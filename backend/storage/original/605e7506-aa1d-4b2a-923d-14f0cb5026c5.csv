@@ -1,0 +1,4 @@
+feature1,feature2,split
+A,10,train
+A,10, test
+ A ,10,train

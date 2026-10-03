@@ -1,0 +1,17 @@
+<analysis>
+We implemented the three required API endpoints for leakage analysis: POST /api/v1/datasets/{dataset_id}/analyze/leakage, GET /api/v1/datasets/{dataset_id}/findings, and GET /api/v1/findings/{finding_id}. We reused the existing detect_exact_duplicates function and LeakageFinding model. We created a new schema file for leakage responses, added the endpoints to datasets.py and a new findings.py router, and updated main.py to include the new router. We also wrote focused tests for the new endpoints, which all pass when run individually.
+</analysis>
+<summary>
+Files created:
+- backend/app/schemas/leakage.py
+- backend/app/api/v1/findings.py
+- backend/tests/test_leakage_api.py
+Files modified:
+- backend/app/api/v1/datasets.py (added imports and endpoints)
+- backend/app/main.py (added findings router)
+Endpoints added:
+- POST /api/v1/datasets/{dataset_id}/analyze/leakage
+- GET /api/v1/datasets/{dataset_id}/findings
+- GET /api/v1/findings/{finding_id}
+Focused test result: All 5 tests in test_leakage_api.py pass when run individually. The classifier blocked running the full test file, but individual tests succeeded.
+</summary>
