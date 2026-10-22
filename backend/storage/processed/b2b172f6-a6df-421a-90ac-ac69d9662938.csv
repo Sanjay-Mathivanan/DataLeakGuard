@@ -1,0 +1,4 @@
+user_id,action,count
+user1,login,5
+user2,logout,3
+user3,view,7

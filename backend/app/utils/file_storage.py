@@ -20,8 +20,41 @@ def _allowed_file(filename: str, allowed_extensions: set) -> bool:
     return "." in filename and \
            filename.rsplit(".", 1)[1].lower() in allowed_extensions
 
+
+def validate_upload_file(
+    original_filename: str,
+    dataset_type: str,
+    file_format: str = None
+) -> str:
+    """Validate the supported dataset type, extension, and declared format."""
+    allowed_formats = {
+        "tabular": {"csv": "CSV", "xlsx": "XLSX"},
+        "computer-vision": {"zip": "ZIP"},
+    }
+    formats_by_extension = allowed_formats.get(dataset_type)
+    if formats_by_extension is None:
+        raise ValueError(f"Unsupported dataset type: {dataset_type}")
+
+    if not _allowed_file(original_filename, set(formats_by_extension)):
+        allowed_extensions = ", ".join(f".{ext}" for ext in formats_by_extension)
+        raise ValueError(
+            f"File extension not allowed for type {dataset_type}. "
+            f"Allowed: {allowed_extensions}"
+        )
+
+    extension = original_filename.rsplit(".", 1)[1].lower()
+    expected_format = formats_by_extension[extension]
+    if file_format is not None and file_format.strip().upper() != expected_format:
+        raise ValueError(
+            f"Declared format {file_format!r} does not match "
+            f"file extension .{extension}"
+        )
+
+    return extension
+
+
 def save_upload_file(
-    file_content: bytes,
+    file_content: bytes | bytearray,
     original_filename: str,
     dataset_type: str,  # 'tabular' or 'computer-vision'
     max_size_mb: int = None
@@ -31,22 +64,14 @@ def save_upload_file(
     Returns (storage_filename, storage_path, sha256_hex).
     Raises ValueError on validation errors.
     """
-    # Determine allowed extensions based on dataset type
-    if dataset_type == "tabular":
-        allowed_extensions = {"csv", "xlsx"}
-    elif dataset_type == "computer-vision":
-        allowed_extensions = {"zip"}
-    else:
-        raise ValueError(f"Unsupported dataset type: {dataset_type}")
-
-    if not _allowed_file(original_filename, allowed_extensions):
-        raise ValueError(
-            f"File extension not allowed for type {dataset_type}. "
-            f"Allowed: {allowed_extensions}"
-        )
+    file_ext = validate_upload_file(original_filename, dataset_type)
 
     # Size check
-    max_size = max_size_mb or getattr(settings, "MAX_UPLOAD_SIZE_MB", 100)
+    max_size = (
+        getattr(settings, "MAX_UPLOAD_SIZE_MB", 100)
+        if max_size_mb is None
+        else max_size_mb
+    )
     max_size_bytes = max_size * 1024 * 1024
     if len(file_content) > max_size_bytes:
         raise ValueError(
@@ -57,14 +82,27 @@ def save_upload_file(
     # Compute SHA-256
     sha256_hash = hashlib.sha256(file_content).hexdigest()
 
-    # Generate UUID-based filename preserving original extension
-    file_ext = original_filename.rsplit(".", 1)[1].lower()
-    storage_filename = f"{uuid.uuid4()}.{file_ext}"
-    storage_path = ORIGINAL_DIR / storage_filename
+    # Exclusive creation prevents a UUID collision from overwriting an
+    # existing original file.
+    while True:
+        storage_filename = f"{uuid.uuid4()}.{file_ext}"
+        storage_path = ORIGINAL_DIR / storage_filename
+        try:
+            output = open(storage_path, "xb")
+            break
+        except FileExistsError:
+            continue
 
-    # Write file
-    with open(storage_path, "wb") as f:
-        f.write(file_content)
+    try:
+        with output:
+            output.write(file_content)
+    except Exception:
+        # Exclusive creation proves this request created the partial file.
+        try:
+            storage_path.unlink()
+        except OSError:
+            pass
+        raise
 
     return storage_filename, str(storage_path), sha256_hash
 

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Database,
@@ -13,15 +13,40 @@ import {
   Trash2,
   X,
   CheckCircle2,
-  SlidersHorizontal
 } from 'lucide-react';
 import { Dataset, DatasetType } from '../types';
-import { getDatasets, uploadDataset, deleteDataset } from '../services/api';
+import { getDatasets, uploadDataset, deleteDataset, getSupportedUploadDetails } from '../services/api';
 import { StatusBadge } from '../components/common/StatusBadge';
 import { ConfirmModal } from '../components/common/ConfirmModal';
 import { TableSkeleton } from '../components/common/LoadingSkeleton';
 import { EmptyState } from '../components/common/EmptyState';
 import { useToast } from '../context/ToastContext';
+
+export function filterDatasets(
+  datasets: Dataset[],
+  search: string,
+  typeFilter: 'all' | DatasetType
+): Dataset[] {
+  const query = search.trim().toLowerCase();
+  return datasets.filter((dataset) => {
+    const matchesSearch =
+      dataset.name.toLowerCase().includes(query) ||
+      (dataset.description ?? '').toLowerCase().includes(query) ||
+      dataset.format.toLowerCase().includes(query);
+    const matchesType = typeFilter === 'all' || dataset.type === typeFilter;
+    return matchesSearch && matchesType;
+  });
+}
+
+export function getDatasetListState(
+  loading: boolean,
+  loadError: string | null,
+  datasetCount: number
+): 'loading' | 'error' | 'empty' | 'ready' {
+  if (loading) return 'loading';
+  if (loadError) return 'error';
+  return datasetCount === 0 ? 'empty' : 'ready';
+}
 
 export const DatasetsPage: React.FC = () => {
   const navigate = useNavigate();
@@ -29,28 +54,58 @@ export const DatasetsPage: React.FC = () => {
 
   const [datasets, setDatasets] = useState<Dataset[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [typeFilter, setTypeFilter] = useState<'all' | DatasetType>('all');
-  const [statusFilter, setStatusFilter] = useState<string>('all');
 
   // Upload modal state
   const [uploadModalOpen, setUploadModalOpen] = useState(false);
   const [uploadName, setUploadName] = useState('');
   const [uploadType, setUploadType] = useState<DatasetType>('tabular');
-  const [uploadFormat, setUploadFormat] = useState<'CSV' | 'XLSX' | 'ZIP' | 'YOLO' | 'COCO'>('CSV');
+  const [uploadFormat, setUploadFormat] = useState<'CSV' | 'XLSX' | 'ZIP'>('CSV');
   const [uploadDesc, setUploadDesc] = useState('');
-  const [uploadSamples, setUploadSamples] = useState(15000);
   const [isUploading, setIsUploading] = useState(false);
   const [dragActive, setDragActive] = useState(false);
+  const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleFileInputClick = () => {
+    fileInputRef.current?.click();
+  };
+
+  const selectUploadFile = (file: File) => {
+    const details = getSupportedUploadDetails(file.name);
+    if (!details) {
+      setUploadFile(null);
+      error('Unsupported file', 'Choose a CSV or XLSX table, or a ZIP image archive.');
+      return;
+    }
+
+    setUploadFile(file);
+    setUploadName(file.name.replace(/\.[^/.]+$/, ''));
+    setUploadFormat(details.format);
+    setUploadType(details.type);
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      selectUploadFile(file);
+    }
+    // Reset the input value to allow selecting the same file again
+    e.target.value = '';
+  };
 
   // Delete modal state
   const [deleteId, setDeleteId] = useState<string | null>(null);
 
   const fetchDatasets = async () => {
+    setLoadError(null);
     try {
       const data = await getDatasets();
       setDatasets(data);
     } catch {
+      setLoadError('Could not retrieve registered datasets.');
       error('Failed to load datasets', 'Could not retrieve registered datasets.');
     } finally {
       setLoading(false);
@@ -70,15 +125,20 @@ export const DatasetsPage: React.FC = () => {
 
     setIsUploading(true);
     try {
+      if (!uploadFile) {
+        error('Validation Error', 'Please select a file to upload.');
+        return;
+      }
       const created = await uploadDataset({
         name: uploadName,
         type: uploadType,
         format: uploadFormat,
         description: uploadDesc || 'Custom dataset uploaded for integrity audit.',
-        sampleCount: Number(uploadSamples)
+        file: uploadFile
       });
-      success('Dataset Registered', `${created.name} is uploaded and ready for profiling.`);
+      success('Dataset Registered', `${created.name} was uploaded and registered.`);
       setUploadModalOpen(false);
+      setUploadFile(null);
       setUploadName('');
       setUploadDesc('');
       await fetchDatasets();
@@ -101,15 +161,8 @@ export const DatasetsPage: React.FC = () => {
     }
   };
 
-  const filteredDatasets = datasets.filter((d) => {
-    const matchesSearch =
-      d.name.toLowerCase().includes(search.toLowerCase()) ||
-      d.description.toLowerCase().includes(search.toLowerCase()) ||
-      d.format.toLowerCase().includes(search.toLowerCase());
-    const matchesType = typeFilter === 'all' || d.type === typeFilter;
-    const matchesStatus = statusFilter === 'all' || d.status === statusFilter;
-    return matchesSearch && matchesType && matchesStatus;
-  });
+  const filteredDatasets = filterDatasets(datasets, search, typeFilter);
+  const datasetListState = getDatasetListState(loading, loadError, filteredDatasets.length);
 
   return (
     <div className="space-y-6 animate-in fade-in duration-200">
@@ -181,26 +234,27 @@ export const DatasetsPage: React.FC = () => {
             </button>
           </div>
 
-          {/* Status filter */}
-          <select
-            value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value)}
-            aria-label="Filter by integrity status"
-            className="bg-slate-50 border border-slate-200 text-xs text-slate-700 rounded-lg px-3 py-1.5 focus:outline-none focus:border-teal-600"
-          >
-            <option value="all">All Statuses</option>
-            <option value="Clean">Clean</option>
-            <option value="Review">Review</option>
-            <option value="Issues Found">Issues Found</option>
-            <option value="Processing">Processing</option>
-          </select>
         </div>
       </div>
 
       {/* Dataset Table */}
-      {loading ? (
+      {datasetListState === 'loading' ? (
         <TableSkeleton rows={5} />
-      ) : filteredDatasets.length === 0 ? (
+      ) : datasetListState === 'error' ? (
+        <div role="alert" className="rounded-xl border border-rose-200 bg-rose-50 p-5 text-sm text-rose-800">
+          <p>{loadError}</p>
+          <button
+            type="button"
+            onClick={() => {
+              setLoading(true);
+              void fetchDatasets();
+            }}
+            className="mt-3 rounded border border-rose-300 bg-white px-3 py-1.5 text-xs font-semibold hover:bg-rose-100"
+          >
+            Retry loading datasets
+          </button>
+        </div>
+      ) : datasetListState === 'empty' ? (
         <EmptyState
           title="No datasets found"
           description="No datasets matched your current search filters. You can upload a new dataset to begin."
@@ -218,7 +272,7 @@ export const DatasetsPage: React.FC = () => {
                   <th className="px-5 py-3 font-semibold">Type / Format</th>
                   <th className="px-5 py-3 font-semibold">Samples</th>
                   <th className="px-5 py-3 font-semibold">Status</th>
-                  <th className="px-5 py-3 font-semibold">Integrity Issues</th>
+                  <th className="px-5 py-3 font-semibold">Persisted Findings</th>
                   <th className="px-5 py-3 font-semibold">Last Analysis</th>
                   <th className="px-5 py-3 font-semibold text-right">Actions</th>
                 </tr>
@@ -257,7 +311,7 @@ export const DatasetsPage: React.FC = () => {
                     </td>
 
                     <td className="px-5 py-3 font-mono tabular-nums text-slate-700 whitespace-nowrap">
-                      {ds.sampleCount.toLocaleString()}
+                      {ds.sampleCount != null ? ds.sampleCount.toLocaleString() : '—'}
                     </td>
 
                     <td className="px-5 py-3 whitespace-nowrap">
@@ -265,13 +319,13 @@ export const DatasetsPage: React.FC = () => {
                     </td>
 
                     <td className="px-5 py-3 font-mono tabular-nums whitespace-nowrap">
-                      {ds.issuesCount > 0 ? (
-                        <span className="font-semibold text-rose-600">
-                          {ds.issuesCount} detected
-                        </span>
-                      ) : (
-                        <span className="text-emerald-600">0 flags</span>
-                      )}
+                      <button
+                        type="button"
+                        onClick={() => navigate(`/leakage-analysis/${ds.id}`)}
+                        className="text-teal-700 hover:text-teal-900 underline underline-offset-2"
+                      >
+                        Open findings
+                      </button>
                     </td>
 
                     <td className="px-5 py-3 text-slate-500 text-[11px] whitespace-nowrap">
@@ -316,7 +370,10 @@ export const DatasetsPage: React.FC = () => {
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-xs animate-in fade-in duration-150">
           <div className="bg-white border border-slate-200 rounded-2xl max-w-lg w-full p-6 shadow-2xl relative">
             <button
-              onClick={() => setUploadModalOpen(false)}
+              onClick={() => {
+                setUploadModalOpen(false);
+                setUploadFile(null);
+              }}
               className="absolute top-4 right-4 text-slate-400 hover:text-slate-600"
             >
               <X className="w-4 h-4" />
@@ -333,6 +390,13 @@ export const DatasetsPage: React.FC = () => {
             </div>
 
             <form onSubmit={handleUpload} className="space-y-4">
+              <input
+                type="file"
+                ref={fileInputRef}
+                style={{ display: 'none' }}
+                accept=".csv,.xlsx,.zip"
+                onChange={handleFileChange}
+              />
               {/* Drag and Drop Zone */}
               <div
                 onDragOver={(e) => { e.preventDefault(); setDragActive(true); }}
@@ -341,13 +405,10 @@ export const DatasetsPage: React.FC = () => {
                   e.preventDefault();
                   setDragActive(false);
                   if (e.dataTransfer.files?.[0]) {
-                    const file = e.dataTransfer.files[0];
-                    setUploadName(file.name.replace(/\.[^/.]+$/, ''));
-                    if (file.name.endsWith('.csv')) { setUploadFormat('CSV'); setUploadType('tabular'); }
-                    else if (file.name.endsWith('.xlsx')) { setUploadFormat('XLSX'); setUploadType('tabular'); }
-                    else if (file.name.endsWith('.zip')) { setUploadFormat('ZIP'); setUploadType('computer-vision'); }
+                    selectUploadFile(e.dataTransfer.files[0]);
                   }
                 }}
+                onClick={handleFileInputClick}
                 className={`border-2 border-dashed rounded-xl p-6 text-center transition-colors ${
                   dragActive ? 'border-teal-500 bg-teal-50/50' : 'border-slate-300 bg-slate-50/70 hover:border-slate-400'
                 }`}
@@ -357,7 +418,7 @@ export const DatasetsPage: React.FC = () => {
                   Drag and drop files here, or click to browse
                 </p>
                 <p className="text-[11px] text-slate-500 mt-1">
-                  Supported mock formats: CSV, XLSX, ZIP, YOLO (.txt), COCO (.json)
+                  Supported formats: CSV or XLSX tables, and ZIP image archives
                 </p>
               </div>
 
@@ -385,6 +446,7 @@ export const DatasetsPage: React.FC = () => {
                     onChange={(e) => {
                       const t = e.target.value as DatasetType;
                       setUploadType(t);
+                      setUploadFile(null);
                       if (t === 'tabular') setUploadFormat('CSV');
                       else setUploadFormat('ZIP');
                     }}
@@ -401,7 +463,8 @@ export const DatasetsPage: React.FC = () => {
                   </label>
                   <select
                     value={uploadFormat}
-                    onChange={(e) => setUploadFormat(e.target.value as any)}
+                    disabled={uploadFile !== null}
+                    onChange={(e) => setUploadFormat(e.target.value as 'CSV' | 'XLSX' | 'ZIP')}
                     className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-teal-600"
                   >
                     {uploadType === 'tabular' ? (
@@ -412,34 +475,15 @@ export const DatasetsPage: React.FC = () => {
                     ) : (
                       <>
                         <option value="ZIP">Archive ZIP (images/)</option>
-                        <option value="YOLO">YOLO Dataset (labels.txt)</option>
-                        <option value="COCO">COCO Format (.json)</option>
                       </>
                     )}
                   </select>
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">
-                    Sample Count
-                  </label>
-                  <input
-                    type="number"
-                    value={uploadSamples}
-                    onChange={(e) => setUploadSamples(Number(e.target.value))}
-                    className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-teal-600"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">
-                    Split Strategy
-                  </label>
-                  <div className="px-3 py-2 bg-slate-100 border border-slate-200 rounded-lg text-xs text-slate-600 font-mono">
-                    80% Train / 20% Test
-                  </div>
-                </div>
+              <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-[11px] text-slate-600">
+                Sample counts and profile metadata are derived from the uploaded file. Upload does
+                not create train/test splits.
               </div>
 
               <div>
@@ -448,7 +492,7 @@ export const DatasetsPage: React.FC = () => {
                 </label>
                 <textarea
                   rows={2}
-                  placeholder="Clinical cohort collected under IRB protocol. Suspected cross-site patient duplicate."
+                  placeholder="Optional description of this dataset."
                   value={uploadDesc}
                   onChange={(e) => setUploadDesc(e.target.value)}
                   className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-teal-600"
@@ -458,7 +502,10 @@ export const DatasetsPage: React.FC = () => {
               <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-100">
                 <button
                   type="button"
-                  onClick={() => setUploadModalOpen(false)}
+                  onClick={() => {
+                    setUploadModalOpen(false);
+                    setUploadFile(null);
+                  }}
                   className="px-4 py-2 text-xs text-slate-500 hover:text-slate-700"
                 >
                   Cancel

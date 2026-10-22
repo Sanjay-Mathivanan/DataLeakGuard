@@ -5,17 +5,13 @@ from app.db import leakage_models
 
 def test_exact_target_duplicate_detected(client, test_db):
     # Dataset with exact target duplication
-    # id,feature,target,leaked_feature
-    # 1,A,1,1
-    # 2,B,0,0
-    # 3,C,1,1
-    # 4,D,0,0
+    # target,leaked_feature
+    # 1,1
+    # 0,0
     import pandas as pd
     df = pd.DataFrame({
-        'id': [1, 2, 3, 4],
-        'feature': ['A', 'B', 'C', 'D'],
-        'target': [1, 0, 1, 0],
-        'leaked_feature': [1, 0, 1, 0]  # Exactly duplicates target
+        'target': [1, 0],
+        'leaked_feature': [1, 0]  # Exactly duplicates target
     })
     csv_content = df.to_csv(index=False).encode()
 
@@ -41,8 +37,7 @@ def test_exact_target_duplicate_detected(client, test_db):
     result = response.json()
     assert result["dataset_id"] == dataset_id
 
-    # Should have exact duplicate findings (none in this dataset) plus target leakage finding
-    # Actually, there are no exact duplicate rows, so only target leakage
+    # There are no duplicate rows, only the target-column duplicate finding.
     assert len(result["findings"]) == 1
     finding = result["findings"][0]
     assert finding["finding_type"] == "target_leakage"
@@ -52,8 +47,8 @@ def test_exact_target_duplicate_detected(client, test_db):
     assert finding["evidence"]["target_column"] == "target"
     assert finding["evidence"]["feature_column"] == "leaked_feature"
     assert finding["evidence"]["detection"] == "exact_target_duplicate"
-    assert finding["evidence"]["matching_rows"] == 4
-    assert finding["evidence"]["total_valid_rows"] == 4
+    assert finding["evidence"]["matching_rows"] == 2
+    assert finding["evidence"]["total_valid_rows"] == 2
 
     # Verify that a LeakageFinding record was created in the database
     from app.db.session import TestingSessionLocal
@@ -86,7 +81,8 @@ def test_deterministic_feature_target_mapping(client, test_db):
     df = pd.DataFrame({
         'feature': ['A', 'A', 'B', 'B'],
         'target': [0, 0, 1, 1],
-        'other_feature': [10, 20, 30, 40]  # This should not leak
+        # This auxiliary feature intentionally maps to both target groups.
+        'other_feature': [10, 20, 10, 20]
     })
     csv_content = df.to_csv(index=False).encode()
 
@@ -146,6 +142,20 @@ def test_deterministic_feature_target_mapping(client, test_db):
         db.close()
 
 
+    # Reanalysis must return the persisted deterministic-mapping finding.
+    repeated_response = client.post(
+        f"/api/v1/datasets/{dataset_id}/analyze/leakage?target_column=target"
+    )
+    assert repeated_response.status_code == status.HTTP_200_OK
+    repeated_findings = [
+        f for f in repeated_response.json()["findings"]
+        if f["finding_type"] == "target_leakage"
+    ]
+    assert len(repeated_findings) == 1
+    assert repeated_findings[0]["id"] == finding["id"]
+    assert repeated_findings[0]["evidence"] == finding["evidence"]
+
+
 def test_no_target_leakage(client, test_db):
     # Dataset where feature values map to multiple target values (no leakage)
     # feature,target
@@ -156,8 +166,7 @@ def test_no_target_leakage(client, test_db):
     import pandas as pd
     df = pd.DataFrame({
         'feature': ['A', 'A', 'B', 'B'],
-        'target': [0, 1, 0, 1],
-        'other_feature': [10, 20, 30, 40]
+        'target': [0, 1, 0, 1]
     })
     csv_content = df.to_csv(index=False).encode()
 
@@ -355,10 +364,8 @@ def test_repeated_analysis_idempotent(client, test_db):
     # Upload a dataset with an exact target duplicate
     import pandas as pd
     df = pd.DataFrame({
-        'id': [1, 2, 3, 4],
-        'feature': ['A', 'B', 'C', 'D'],
-        'target': [1, 0, 1, 0],
-        'leaked_feature': [1, 0, 1, 0]  # Exactly duplicates target
+        'target': [1, 0],
+        'leaked_feature': [1, 0]  # Exactly duplicates target
     })
     csv_content = df.to_csv(index=False).encode()
 
@@ -490,10 +497,8 @@ def test_findings_api_returns_target_leakage(client, test_db):
     # Upload a dataset with an exact target duplicate
     import pandas as pd
     df = pd.DataFrame({
-        'id': [1, 2, 3, 4],
-        'feature': ['A', 'B', 'C', 'D'],
-        'target': [1, 0, 1, 0],
-        'leaked_feature': [1, 0, 1, 0]  # Exactly duplicates target
+        'target': [1, 0],
+        'leaked_feature': [1, 0]  # Exactly duplicates target
     })
     csv_content = df.to_csv(index=False).encode()
 
@@ -532,10 +537,8 @@ def test_individual_finding_api_returns_target_leakage(client, test_db):
     # Upload a dataset with an exact target duplicate
     import pandas as pd
     df = pd.DataFrame({
-        'id': [1, 2, 3, 4],
-        'feature': ['A', 'B', 'C', 'D'],
-        'target': [1, 0, 1, 0],
-        'leaked_feature': [1, 0, 1, 0]  # Exactly duplicates target
+        'target': [1, 0],
+        'leaked_feature': [1, 0]  # Exactly duplicates target
     })
     csv_content = df.to_csv(index=False).encode()
 
@@ -568,3 +571,86 @@ def test_individual_finding_api_returns_target_leakage(client, test_db):
     assert finding["finding_type"] == "target_leakage"
     assert finding["evidence"]["feature_column"] == "leaked_feature"
     assert finding["evidence"]["target_column"] == "target"
+
+
+def _run_target_mapping_analysis(client, dataframe, name):
+    csv_content = dataframe.to_csv(index=False).encode()
+    upload_response = client.post(
+        "/api/v1/datasets",
+        data={
+            "name": name,
+            "type": "tabular",
+            "format": "CSV",
+            "description": "target mapping regression test",
+        },
+        files={"file": ("target_mapping.csv", csv_content, "text/csv")},
+    )
+    assert upload_response.status_code == status.HTTP_201_CREATED
+    dataset_id = upload_response.json()["id"]
+
+    analysis_response = client.post(
+        f"/api/v1/datasets/{dataset_id}/analyze/leakage?target_column=target"
+    )
+    assert analysis_response.status_code == status.HTTP_200_OK
+    return [
+        finding
+        for finding in analysis_response.json()["findings"]
+        if finding["finding_type"] == "target_leakage"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("feature_values", "target_values", "expected_mapping"),
+    [
+        pytest.param(
+            ["A", "B"],
+            ["0", "1"],
+            {"A": "0", "B": "1"},
+            id="one-to-one",
+        ),
+        pytest.param(
+            ["A", "B", "C"],
+            ["0", "0", "1"],
+            {"A": "0", "B": "0", "C": "1"},
+            id="many-to-one",
+        ),
+    ],
+)
+def test_deterministic_mapping_supports_one_to_one_and_many_to_one(
+    client, test_db, feature_values, target_values, expected_mapping
+):
+    import pandas as pd
+
+    findings = _run_target_mapping_analysis(
+        client,
+        pd.DataFrame({"feature": feature_values, "target": target_values}),
+        "deterministic mapping cardinality",
+    )
+
+    assert len(findings) == 1
+    evidence = findings[0]["evidence"]
+    assert evidence["detection"] == "deterministic_feature_target_mapping"
+    assert evidence["mapping"] == expected_mapping
+    assert evidence["unique_feature_values"] == len(expected_mapping)
+    assert evidence["unique_target_values"] == len(set(target_values))
+
+
+def test_deterministic_mapping_ignores_missing_and_blank_pairs(client, test_db):
+    import pandas as pd
+
+    dataframe = pd.DataFrame(
+        {
+            "feature": ["A", "A", "B", "B", None, "C", "D", " "],
+            "target": ["0", "0", "1", "1", "1", None, " ", "0"],
+        }
+    )
+
+    findings = _run_target_mapping_analysis(
+        client, dataframe, "deterministic mapping missing values"
+    )
+
+    assert len(findings) == 1
+    evidence = findings[0]["evidence"]
+    assert evidence["mapping"] == {"A": "0", "B": "1"}
+    assert evidence["unique_feature_values"] == 2
+    assert evidence["unique_target_values"] == 2

@@ -1,0 +1,5 @@
+patient_id,split,event_date,target,leaked_feature,feature
+P001,train,2026-01-01,0,0,A
+P002,train,2026-01-02,1,1,B
+P001,test,2026-01-03,0,0,A
+P003,test,2026-01-04,1,1,B

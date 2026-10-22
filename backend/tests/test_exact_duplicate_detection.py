@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.db import models, leakage_models
 from app.core.config import settings
+from app.utils.file_storage import ORIGINAL_DIR
 import tempfile
 
 API_V1_STR = "/api/v1"
@@ -385,7 +386,7 @@ def test_missing_stored_file(client, test_db):
     storage_filename = data["storage_filename"]
 
     # Delete the stored file
-    storage_path = os.path.join("backend", "storage", "original", storage_filename)
+    storage_path = ORIGINAL_DIR / storage_filename
     if os.path.exists(storage_path):
         os.remove(storage_path)
 

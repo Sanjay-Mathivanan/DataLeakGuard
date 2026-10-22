@@ -1,0 +1,3 @@
+patient_id,split,value
+P001,train,10
+P002,test,20

@@ -1,0 +1,5 @@
+feature1,feature2,split
+1,2,train
+3,4,train
+1,2,test
+5,6,test

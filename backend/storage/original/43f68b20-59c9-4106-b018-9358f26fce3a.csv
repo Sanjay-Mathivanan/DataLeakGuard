@@ -1,0 +1,5 @@
+feature1,feature2,split
+A,10,train
+B,20,train
+C,30,validation
+D,40,test

@@ -3,6 +3,7 @@ import { Menu, Search, Bell, HelpCircle, Check, Info, Shield, X, LogOut } from '
 import { Breadcrumb } from '../common/Breadcrumb';
 import { useAuth } from '../../context/AuthContext';
 import { useNavigate } from 'react-router-dom';
+import { getDatasetWorkflowPath } from '../../services/datasetNavigation';
 
 interface NavbarProps {
   onToggleSidebar: () => void;
@@ -23,9 +24,7 @@ export const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar }) => {
   ];
 
   const quickLinks = [
-    { label: 'Adult Census Income Dataset', path: '/datasets/ds-adult-income' },
-    { label: 'Chest X-Ray Pneumonia CV Cohort', path: '/datasets/ds-chest-xray' },
-    { label: 'Leakage Analysis & Repair', path: '/leakage-analysis/ds-adult-income' },
+    { label: 'Browse datasets for analysis and repair', path: getDatasetWorkflowPath('findings') },
     { label: 'Model Fingerprint & Integrity', path: '/model-integrity' },
     { label: 'Inference Provenance Audit', path: '/inference-provenance' },
     { label: 'Assurance Report REP-2026-0042', path: '/reports/REP-2026-0042' }

@@ -1,0 +1,5 @@
+patient_id,visit_date,hospital
+001,2023-01-01,City Hospital
+002,2023-01-02,County Clinic
+001,2023-01-03,City Hospital
+003,2023-01-01,City Hospital

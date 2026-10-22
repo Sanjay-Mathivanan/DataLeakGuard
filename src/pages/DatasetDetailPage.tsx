@@ -8,7 +8,6 @@ import {
   FileSpreadsheet,
   Image,
   Layers,
-  AlertTriangle,
   CheckCircle2,
   Calendar,
   Tag,
@@ -22,6 +21,13 @@ import { StatCard } from '../components/common/StatCard';
 import { CardSkeleton, TableSkeleton } from '../components/common/LoadingSkeleton';
 import { useToast } from '../context/ToastContext';
 
+export function formatDimensionRange(min: number | null | undefined, max: number | null | undefined): string {
+  if (typeof min !== 'number' && typeof max !== 'number') return '—';
+  const minLabel = typeof min === 'number' ? min.toLocaleString() : '—';
+  const maxLabel = typeof max === 'number' ? max.toLocaleString() : '—';
+  return `${minLabel}–${maxLabel}`;
+}
+
 export const DatasetDetailPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -29,11 +35,16 @@ export const DatasetDetailPage: React.FC = () => {
 
   const [dataset, setDataset] = useState<Dataset | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [activeTab, setActiveTab] = useState<'overview' | 'profile' | 'integrity' | 'distribution' | 'history'>('overview');
 
   useEffect(() => {
     async function load() {
-      if (!id) return;
+      if (!id) {
+        setLoadError(true);
+        setLoading(false);
+        return;
+      }
       try {
         const found = await getDatasetById(id);
         if (found) {
@@ -42,6 +53,7 @@ export const DatasetDetailPage: React.FC = () => {
           error('Dataset Not Found', `Dataset with ID ${id} does not exist.`);
         }
       } catch {
+        setLoadError(true);
         error('Error', 'Failed to retrieve dataset details.');
       } finally {
         setLoading(false);
@@ -62,7 +74,9 @@ export const DatasetDetailPage: React.FC = () => {
   if (!dataset) {
     return (
       <div className="p-8 text-center bg-white rounded-xl border border-slate-200 shadow-xs">
-        <p className="text-slate-600">Dataset not found.</p>
+        <p className="text-slate-600">
+          {loadError ? 'Dataset details could not be loaded.' : 'Dataset not found.'}
+        </p>
         <button
           onClick={() => navigate('/datasets')}
           className="mt-4 px-4 py-2 text-xs font-semibold rounded-lg bg-teal-700 hover:bg-teal-800 text-white transition-colors shadow-xs"
@@ -127,8 +141,8 @@ export const DatasetDetailPage: React.FC = () => {
         <div className="mt-6 pt-4 border-t border-slate-100 flex items-center gap-1 overflow-x-auto">
           {[
             { key: 'overview', label: 'Overview' },
-            { key: 'profile', label: isCV ? 'Vision Annotations' : 'Feature Profiles' },
-            { key: 'integrity', label: `Integrity Findings (${dataset.issuesCount})` },
+            { key: 'profile', label: isCV ? 'Image ZIP Profile' : 'Feature Profiles' },
+            { key: 'integrity', label: 'Persisted Findings' },
             { key: 'distribution', label: 'Distribution & Splits' },
             { key: 'history', label: 'Audit History' }
           ].map((tab) => (
@@ -153,102 +167,114 @@ export const DatasetDetailPage: React.FC = () => {
           {/* Stat Cards */}
           <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
             <div className="p-4 rounded-xl border border-slate-200 bg-white shadow-xs">
-              <span className="text-[11px] text-slate-500 block">Total Samples</span>
+              <span className="text-[11px] text-slate-500 block">{isCV ? 'Images in ZIP' : 'Dataset Rows'}</span>
               <span className="text-xl font-bold font-mono text-slate-900 tabular-nums">
-                {dataset.sampleCount.toLocaleString()}
+                {(dataset.sampleCount ?? (isCV ? dataset.profile?.imageCount : null))?.toLocaleString() ?? '—'}
               </span>
-              <span className="text-[10px] text-slate-500 block mt-0.5">80% Train / 20% Test</span>
+              <span className="text-[10px] text-slate-500 block mt-0.5">Reported by the dataset profiler</span>
             </div>
 
             <div className="p-4 rounded-xl border border-slate-200 bg-white shadow-xs">
-              <span className="text-[11px] text-slate-500 block">{isCV ? 'Image Resolutions' : 'Feature Columns'}</span>
+              <span className="text-[11px] text-slate-500 block">{isCV ? 'Image Format' : 'Feature Columns'}</span>
               <span className="text-xl font-bold font-mono text-slate-900 tabular-nums">
-                {isCV ? dataset.cvStats?.resolutionDistribution.length : dataset.featureCount}
+                {isCV ? dataset.profile?.format ?? '—' : dataset.featureCount ?? '—'}
               </span>
-              <span className="text-[10px] text-slate-500 block mt-0.5">{isCV ? 'Multi-scale' : 'Categorical & Numeric'}</span>
+              <span className="text-[10px] text-slate-500 block mt-0.5">
+                {isCV ? 'From the image ZIP profile' : 'From the tabular profile'}
+              </span>
             </div>
 
             <div className="p-4 rounded-xl border border-slate-200 bg-white shadow-xs">
               <span className="text-[11px] text-slate-500 block">Target Classes</span>
               <span className="text-xl font-bold font-mono text-slate-900 tabular-nums">
-                {dataset.classCount}
+                {dataset.classCount ?? '—'}
               </span>
               <span className="text-[10px] text-slate-500 block mt-0.5">
-                {isCV ? dataset.cvStats?.classes.join(', ') : 'Discrete labels'}
+                Class metadata is not reported by the current profiler
               </span>
             </div>
 
             <div className="p-4 rounded-xl border border-slate-200 bg-white shadow-xs">
-              <span className="text-[11px] text-slate-500 block">Integrity Flags</span>
-              <span className="text-xl font-bold font-mono text-rose-600 tabular-nums">
-                {dataset.issuesCount}
-              </span>
-              <span className="text-[10px] text-rose-600/80 block mt-0.5 font-medium">Under configured checks</span>
+              <span className="text-[11px] text-slate-500 block">Persisted Findings</span>
+              <button
+                type="button"
+                onClick={() => navigate(`/leakage-analysis/${dataset.id}`)}
+                className="mt-1 text-sm font-semibold text-teal-700 hover:text-teal-900"
+              >
+                Open findings
+              </button>
+              <span className="text-[10px] text-slate-500 block mt-0.5">Finding totals are not included in this response</span>
             </div>
 
             <div className="p-4 rounded-xl border border-slate-200 bg-white shadow-xs">
-              <span className="text-[11px] text-slate-500 block">Last Audit</span>
+              <span className="text-[11px] text-slate-500 block">Last Analysis Timestamp</span>
               <span className="text-xs font-mono font-medium text-slate-800 block truncate">
-                {dataset.lastAnalysis.split(' ')[0]}
+                {dataset.lastAnalysis != null ? dataset.lastAnalysis.split(' ')[0] : '—'}
               </span>
-              <span className="text-[10px] text-slate-500 block mt-0.5">Timestamp verified</span>
+              <span className="text-[10px] text-slate-500 block mt-0.5">
+                {dataset.lastAnalysis != null ? 'Backend-provided metadata' : 'Not reported by the backend'}
+              </span>
             </div>
           </div>
 
           {/* Tabular vs CV Sample Preview Cards */}
           {isCV ? (
-            <div className="space-y-4">
-              <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-xs">
-                <h3 className="text-sm font-semibold text-slate-900 mb-2">Computer Vision Cohort Metadata</h3>
-                <p className="text-xs text-slate-500 mb-4">
-                  Multi-center radiographic acquisitions inspected for perceptual near-duplicate patient scans.
+            <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-xs">
+              <h3 className="text-sm font-semibold text-slate-900 mb-2">Image ZIP Profile</h3>
+              <p className="text-xs text-slate-500 mb-4">
+                Basic archive and sampled image-dimension metadata returned by the backend profiler.
+                This is not label, patient, or duplicate analysis.
+              </p>
+              {dataset.profile?.error && (
+                <p role="alert" className="mb-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
+                  The backend returned a profile error: {dataset.profile.error}
                 </p>
-
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-                  {dataset.cvStats?.resolutionDistribution.map((res) => (
-                    <div key={res.label} className="p-3 bg-slate-50 border border-slate-200 rounded-lg">
-                      <span className="text-xs text-slate-500 block">Resolution Dimension</span>
-                      <span className="text-base font-bold font-mono text-teal-800">{res.label}</span>
-                      <span className="text-[11px] text-slate-500 block mt-0.5 tabular-nums">{res.count} images</span>
-                    </div>
-                  ))}
+              )}
+              <dl className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                  <dt className="text-xs text-slate-500">Images in ZIP</dt>
+                  <dd className="mt-1 font-mono text-sm text-slate-900">
+                    {dataset.profile?.imageCount?.toLocaleString() ?? '—'}
+                  </dd>
                 </div>
-
-                <h4 className="text-xs font-semibold text-slate-700 uppercase tracking-wider font-mono mb-3">
-                  Sample Batch Index & Patient Fingerprints
-                </h4>
-
-                <div className="overflow-x-auto border border-slate-200 rounded-lg">
-                  <table className="w-full text-left text-xs">
-                    <thead className="bg-slate-50 text-slate-500 font-mono uppercase">
-                      <tr>
-                        <th className="px-4 py-2.5">Sample ID</th>
-                        <th className="px-4 py-2.5">Patient Identifier</th>
-                        <th className="px-4 py-2.5">Assigned Class</th>
-                        <th className="px-4 py-2.5">Source Site</th>
-                        <th className="px-4 py-2.5">Native Resolution</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100">
-                      {dataset.previewRows?.map((row: any, i) => (
-                        <tr key={i} className="hover:bg-slate-50/80">
-                          <td className="px-4 py-2.5 font-mono text-teal-700 font-medium">{row.id}</td>
-                          <td className="px-4 py-2.5 font-mono text-slate-800">{row.patientId}</td>
-                          <td className="px-4 py-2.5 text-slate-800">{row.label}</td>
-                          <td className="px-4 py-2.5 text-slate-500">{row.hospitalTag}</td>
-                          <td className="px-4 py-2.5 font-mono text-slate-500">{row.resolution}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                  <dt className="text-xs text-slate-500">Image format</dt>
+                  <dd className="mt-1 font-mono text-sm text-slate-900">
+                    {dataset.profile?.format ?? '—'}
+                  </dd>
                 </div>
+                <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                  <dt className="text-xs text-slate-500">Sampled width range</dt>
+                  <dd className="mt-1 font-mono text-sm text-slate-900">
+                    {formatDimensionRange(dataset.profile?.widthMin, dataset.profile?.widthMax)}
+                  </dd>
+                </div>
+                <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                  <dt className="text-xs text-slate-500">Sampled height range</dt>
+                  <dd className="mt-1 font-mono text-sm text-slate-900">
+                    {formatDimensionRange(dataset.profile?.heightMin, dataset.profile?.heightMax)}
+                  </dd>
+                </div>
+                <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                  <dt className="text-xs text-slate-500">Images sampled for dimensions</dt>
+                  <dd className="mt-1 font-mono text-sm text-slate-900">
+                    {dataset.profile?.sampledImages?.toLocaleString() ?? '—'}
+                  </dd>
+                </div>
+              </dl>
+              {!dataset.profile && (
+                <p className="mt-4 text-xs text-slate-500">
+                  No image profile metadata was returned for this dataset.
+                </p>
+              )}
               </div>
-            </div>
           ) : (
             <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-xs">
               <div className="flex items-center justify-between mb-3">
                 <h3 className="text-sm font-semibold text-slate-900">Raw Data Row Previews (First 6 Records)</h3>
-                <span className="text-[11px] font-mono text-slate-500">14 Features</span>
+                <span className="text-[11px] font-mono text-slate-500">
+                  {dataset.columns?.length ?? dataset.featureCount ?? '—'} columns
+                </span>
               </div>
 
               <div className="overflow-x-auto border border-slate-200 rounded-lg">
@@ -285,42 +311,61 @@ export const DatasetDetailPage: React.FC = () => {
         <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-4 shadow-xs">
           <div className="flex items-center justify-between">
             <div>
-              <h3 className="text-sm font-semibold text-slate-900">Feature Schema & Cardinality</h3>
-              <p className="text-xs text-slate-500">Statistical distribution and missingness audit per feature.</p>
+              <h3 className="text-sm font-semibold text-slate-900">
+                {isCV ? 'Image ZIP Profile' : 'Feature Schema & Cardinality'}
+              </h3>
+              <p className="text-xs text-slate-500">
+                {isCV
+                  ? 'The current ZIP profiler does not extract annotations, classes, or patient identifiers.'
+                  : 'Profiled column names, types, missing values, and unique-value counts from the uploaded file.'}
+              </p>
             </div>
-            <span className="text-xs font-mono text-slate-500">Clean Schema Verification</span>
+            <span className="text-xs font-mono text-slate-500">Backend profile fields</span>
           </div>
 
-          <div className="overflow-x-auto border border-slate-200 rounded-lg">
-            <table className="w-full text-left text-xs">
-              <thead className="bg-slate-50 text-slate-500 font-mono uppercase">
-                <tr>
-                  <th className="px-4 py-2.5">Feature Name</th>
-                  <th className="px-4 py-2.5">Data Type</th>
-                  <th className="px-4 py-2.5">Missing Count</th>
-                  <th className="px-4 py-2.5">Cardinality (Unique)</th>
-                  <th className="px-4 py-2.5">Leakage Potential</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {dataset.columns?.map((col) => (
-                  <tr key={col.name} className="hover:bg-slate-50/80">
-                    <td className="px-4 py-2.5 font-semibold text-slate-900 font-mono">{col.name}</td>
-                    <td className="px-4 py-2.5 text-slate-500 capitalize">{col.type}</td>
-                    <td className="px-4 py-2.5 font-mono tabular-nums text-slate-700">{col.missingCount} ({((col.missingCount / dataset.sampleCount) * 100).toFixed(1)}%)</td>
-                    <td className="px-4 py-2.5 font-mono tabular-nums text-slate-700">{col.uniqueCount}</td>
-                    <td className="px-4 py-2.5">
-                      {col.name === 'capital_gain' || col.name === 'fnlwgt' ? (
-                        <span className="text-[11px] font-mono text-rose-600 font-semibold">High (Identified in Leak)</span>
-                      ) : (
-                        <span className="text-[11px] font-mono text-emerald-600">Nominal</span>
-                      )}
-                    </td>
+          {isCV ? (
+            <p className="rounded-lg border border-slate-200 bg-slate-50 p-4 text-xs text-slate-600">
+              Image archive counts and sampled dimensions, when available, are shown in the Overview.
+              No annotation or label analysis is returned by this upload profiler.
+            </p>
+          ) : dataset.columns?.length ? (
+            <div className="overflow-x-auto border border-slate-200 rounded-lg">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-slate-50 text-slate-500 font-mono uppercase">
+                  <tr>
+                    <th className="px-4 py-2.5">Column Name</th>
+                    <th className="px-4 py-2.5">Data Type</th>
+                    <th className="px-4 py-2.5">Missing Count</th>
+                    <th className="px-4 py-2.5">Unique Values</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {dataset.columns.map((col) => (
+                    <tr key={col.name} className="hover:bg-slate-50/80">
+                      <td className="px-4 py-2.5 font-semibold text-slate-900 font-mono">{col.name}</td>
+                      <td className="px-4 py-2.5 text-slate-500 capitalize">{col.type}</td>
+                      <td className="px-4 py-2.5 font-mono tabular-nums text-slate-700">
+                        {typeof col.missingCount === 'number'
+                          ? `${col.missingCount.toLocaleString()}${
+                              typeof dataset.sampleCount === 'number' && dataset.sampleCount > 0
+                                ? ` (${((col.missingCount / dataset.sampleCount) * 100).toFixed(1)}%)`
+                                : ''
+                            }`
+                          : '—'}
+                      </td>
+                      <td className="px-4 py-2.5 font-mono tabular-nums text-slate-700">
+                        {typeof col.uniqueCount === 'number' ? col.uniqueCount.toLocaleString() : '—'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <p className="rounded-lg border border-slate-200 bg-slate-50 p-4 text-xs text-slate-600">
+              No tabular column profile was returned for this dataset.
+            </p>
+          )}
         </div>
       )}
 
@@ -329,28 +374,22 @@ export const DatasetDetailPage: React.FC = () => {
         <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-4 shadow-xs">
           <div className="flex items-center justify-between">
             <div>
-              <h3 className="text-sm font-semibold text-slate-900">Active Integrity Violations</h3>
-              <p className="text-xs text-slate-500">Detailed breakdown of cross-partition leakage and duplicates.</p>
+              <h3 className="text-sm font-semibold text-slate-900">Persisted Findings</h3>
+              <p className="text-xs text-slate-500">
+                Finding records and available evidence are loaded in the Leakage Workspace.
+              </p>
             </div>
             <button
               onClick={() => navigate(`/leakage-analysis/${dataset.id}`)}
               className="px-3 py-1.5 text-xs font-semibold rounded bg-teal-700 hover:bg-teal-800 text-white transition-colors shadow-xs"
             >
-              Open Full Leakage Workspace
+              Open Leakage Workspace
             </button>
           </div>
 
-          <div className="p-4 bg-amber-50/80 border border-amber-200 rounded-lg flex items-start gap-3">
-            <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
-            <div className="text-xs text-amber-900 space-y-1">
-              <p className="font-semibold text-amber-950">
-                {dataset.issuesCount} Potential Integrity Anomalies Identified
-              </p>
-              <p className="text-amber-800 leading-relaxed">
-                Evaluation boundary overlap (142 exact duplicates, 38 identity leaks, and global preprocessing imputation)
-                inflates reported test benchmark performance.
-              </p>
-            </div>
+          <div className="rounded-lg border border-slate-200 bg-slate-50 p-4 text-xs text-slate-600">
+            The dataset profile does not include a finding summary. An empty profile summary does not
+            establish that every detector ran.
           </div>
         </div>
       )}
@@ -358,30 +397,11 @@ export const DatasetDetailPage: React.FC = () => {
       {/* Tab 4: Distribution & Splits */}
       {activeTab === 'distribution' && (
         <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-4 shadow-xs">
-          <h3 className="text-sm font-semibold text-slate-900">Stratification & Validation Boundary Audit</h3>
-          <p className="text-xs text-slate-500">
-            Split verification conducted to ensure zero test-set overlap.
-          </p>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div className="p-4 bg-slate-50 border border-slate-200 rounded-lg">
-              <span className="text-xs text-slate-500 block font-mono">Training Partition (80%)</span>
-              <span className="text-xl font-bold font-mono text-slate-900 mt-1 block">
-                {Math.round(dataset.sampleCount * 0.8).toLocaleString()} records
-              </span>
-              <p className="text-[11px] text-slate-500 mt-2">
-                Features fitted with StandardScaler inside k-fold pipeline.
-              </p>
-            </div>
-
-            <div className="p-4 bg-rose-50/70 border border-rose-200 rounded-lg">
-              <span className="text-xs text-rose-700 block font-mono">Test Partition (20%)</span>
-              <span className="text-xl font-bold font-mono text-slate-900 mt-1 block">
-                {Math.round(dataset.sampleCount * 0.2).toLocaleString()} records
-              </span>
-              <p className="text-[11px] text-rose-700 mt-2">
-                Contaminated with 142 duplicate train rows. Requires quarantined sanitization.
-              </p>
-            </div>
+          <h3 className="text-sm font-semibold text-slate-900">Distribution &amp; Split Information</h3>
+          <div className="rounded-lg border border-slate-200 bg-slate-50 p-4 text-xs text-slate-600">
+            No split sizes or distribution metrics are included in the dataset profile. The current
+            analysis page does not submit split or feature-column selections, so it does not run
+            split-based detectors.
           </div>
         </div>
       )}
@@ -389,23 +409,25 @@ export const DatasetDetailPage: React.FC = () => {
       {/* Tab 5: History */}
       {activeTab === 'history' && (
         <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-3 shadow-xs">
-          <h3 className="text-sm font-semibold text-slate-900">Dataset Audit Trail</h3>
+          <h3 className="text-sm font-semibold text-slate-900">Dataset Timestamps</h3>
           <div className="space-y-2 text-xs">
             <div className="p-3 bg-slate-50 rounded-lg border border-slate-200 flex items-center justify-between">
               <div>
-                <p className="font-semibold text-slate-900">Automated 8-Stage Leakage Scan Completed</p>
-                <p className="text-slate-500 text-[11px]">{dataset.lastAnalysis}</p>
-              </div>
-              <StatusBadge status="Issues Found" size="sm" />
-            </div>
-
-            <div className="p-3 bg-slate-50 rounded-lg border border-slate-200 flex items-center justify-between">
-              <div>
-                <p className="font-semibold text-slate-900">Initial Repository Ingestion</p>
+                <p className="font-semibold text-slate-900">Dataset upload recorded</p>
                 <p className="text-slate-500 text-[11px]">{dataset.uploadedAt}</p>
               </div>
-              <StatusBadge status="Clean" size="sm" />
             </div>
+
+            {dataset.lastAnalysis ? (
+              <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
+                <p className="font-semibold text-slate-900">Last analysis timestamp recorded</p>
+                <p className="text-slate-500 text-[11px]">{dataset.lastAnalysis}</p>
+              </div>
+            ) : (
+              <p className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-slate-600">
+                No last-analysis timestamp is reported in this dataset record.
+              </p>
+            )}
           </div>
         </div>
       )}

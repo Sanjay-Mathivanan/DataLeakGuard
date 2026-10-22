@@ -1,0 +1,18 @@
+<analysis>
+PHASE 5.1 INSPECTION ANALYSIS:
+- Dataset storage architecture: backend/storage/ with original/processed/quarantine subdirectories, UUID-based filenames, SHA-256 integrity checks
+- Dataset model: SQLAlchemy ORM with storage_filename, file_sha256 fields linking to stored files
+- LeakageFinding model: Stores detection results with evidence JSON field
+- Phase 3 detectors: Five implemented detectors (exact duplicate, entity overlap, target leakage, temporal leakage, train/test contamination)
+- Evidence architecture: Read-only transformation service creating EvidenceResponse from LeakageFinding + Dataset
+- File/storage consistency: Dataset model maintains filesystem references via storage_filename and file_sha256
+- Test verification: Tests use ORIGINAL_DIR constant for path resolution, confirming 89/89 tests pass
+- Repair/quarantine concept: Must preserve original data, create separate results, maintain evidence audit trail
+- Implementation gaps: Missing repair/quarantine service layer, API endpoints, storage organization for results
+- Security considerations: Path traversal prevention, unsafe filename handling, original file preservation
+- Idempotency requirement: Repair operations must be safely repeatable without changing unrelated data
+</analysis>
+<summary>
+PHASE 5.1 — INSPECTION ONLY — COMPLETE
+Files modified: NONE
+</summary>

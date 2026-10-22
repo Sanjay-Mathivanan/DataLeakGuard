@@ -7,7 +7,11 @@ class Settings(BaseSettings):
     # Database
     DATABASE_URL: str = "sqlite:///./test.db"
     # CORS
-    BACKEND_CORS_ORIGINS: list = ["http://localhost:3001", "http://localhost:8000"]
+    BACKEND_CORS_ORIGINS: list = [
+        "http://localhost:3000",
+        "http://localhost:3001",
+        "http://localhost:8000",
+    ]
     # Upload settings
     MAX_UPLOAD_SIZE_MB: int = 100
 

@@ -456,8 +456,8 @@ def test_only_split_column_supplied(client, test_db):
     response = client.post(
         f"/api/v1/datasets/{dataset_id}/analyze/leakage?split_column=split"
     )
-    assert response.status_code == status.HTTP_400_BAD_REQUEST
-    assert "Both entity_column and split_column must be provided for entity overlap detection" in response.json()["detail"]
+    assert response.status_code == status.HTTP_200_OK
+    # This should succeed as split_column-only analysis for train/test contamination
 
 
 def test_repeated_analysis_idempotent(client, test_db):

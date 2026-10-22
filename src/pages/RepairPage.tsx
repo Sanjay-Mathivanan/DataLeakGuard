@@ -1,325 +1,477 @@
-import React, { useState, useEffect } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
-import {
-  Wrench,
-  CheckCircle2,
-  Download,
-  RotateCcw,
-  ArrowRight,
-  TrendingDown,
-  ShieldCheck,
-  Filter,
-  AlertTriangle,
-  FileCheck
-} from 'lucide-react';
-import { RepairItem, RepairResult, ImpactAnalysis } from '../types';
-import { getRepairItems, executeRepair, retrainModel } from '../services/api';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { useParams } from 'react-router-dom';
+import { Clock3, FileCheck2, LoaderCircle, ShieldAlert, Wrench } from 'lucide-react';
 import { SeverityBadge } from '../components/common/SeverityBadge';
-import { useToast } from '../context/ToastContext';
+import {
+  getDatasetOperationHistory,
+  getFindingTypeLabel,
+  getFindings,
+  quarantineFinding,
+  repairFinding,
+} from '../services/api';
+import {
+  DatasetOperationRecord,
+  FindingOperationType,
+  PersistedFinding,
+} from '../types';
 
-export const RepairPage: React.FC = () => {
-  const { id = 'ds-adult-income' } = useParams<{ id: string }>();
-  const navigate = useNavigate();
-  const { success, info } = useToast();
+export function getSupportedFindingOperations(
+  finding: PersistedFinding,
+  datasetId: string | null | undefined
+): FindingOperationType[] {
+  if (!datasetId?.trim() || !finding.id.trim() || finding.datasetId !== datasetId) {
+    return [];
+  }
 
-  const [items, setItems] = useState<RepairItem[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [repairResult, setRepairResult] = useState<RepairResult | null>(null);
-  const [isRepairing, setIsRepairing] = useState(false);
+  const rowIndices = finding.evidence?.row_indices;
+  const isValidIndex = (index: unknown): index is number =>
+    typeof index === 'number' && Number.isInteger(index) && index >= 0;
 
-  // Retrain state
-  const [isRetraining, setIsRetraining] = useState(false);
-  const [retrainProgress, setRetrainProgress] = useState(0);
-  const [retrainMsg, setRetrainMsg] = useState('');
-  const [retrainComplete, setRetrainComplete] = useState(false);
-
-  useEffect(() => {
-    async function load() {
-      try {
-        const data = await getRepairItems(id);
-        setItems(data);
-      } finally {
-        setLoading(false);
-      }
-    }
-    load();
-  }, [id]);
-
-  const toggleItem = (itemId: string) => {
-    setItems((prev) =>
-      prev.map((item) => (item.id === itemId ? { ...item, selected: !item.selected } : item))
-    );
-  };
-
-  const handleCreateCorrected = async () => {
-    const selectedIds = items.filter((i) => i.selected).map((i) => i.id);
-    if (selectedIds.length === 0) {
-      info('No Issues Selected', 'Please select at least one issue to quarantine or repair.');
-      return;
+  if (finding.findingType === 'exact_duplicate') {
+    if (!Array.isArray(rowIndices) || rowIndices.length === 0 || !rowIndices.every(isValidIndex)) {
+      return [];
     }
 
-    setIsRepairing(true);
-    try {
-      const res = await executeRepair(id, selectedIds);
-      setRepairResult(res);
-      success('Dataset Cleansed', `Quarantined ${res.quarantinedCount} leaks and removed ${res.removedCount} duplicates.`);
-    } finally {
-      setIsRepairing(false);
+    const operations: FindingOperationType[] = ['quarantine'];
+    const duplicateCount = finding.evidence?.duplicate_count;
+    if (
+      rowIndices.length > 1 &&
+      typeof duplicateCount === 'number' &&
+      Number.isInteger(duplicateCount) &&
+      duplicateCount > 0
+    ) {
+      operations.unshift('repair');
     }
-  };
-
-  const handleRetrain = async () => {
-    setIsRetraining(true);
-    setRetrainProgress(0);
-    try {
-      await retrainModel(id, 'mdl-xgboost-census', (pct, msg) => {
-        setRetrainProgress(pct);
-        setRetrainMsg(msg);
-      });
-      setRetrainComplete(true);
-      success('Retraining Finished', 'Evaluation conducted on sanitized test partition.');
-    } finally {
-      setIsRetraining(false);
+    return operations;
+  }
+  if (
+    finding.findingType === 'entity_overlap' ||
+    finding.findingType === 'train_test_contamination'
+  ) {
+    if (
+      !rowIndices ||
+      typeof rowIndices !== 'object' ||
+      Array.isArray(rowIndices)
+    ) {
+      return [];
     }
-  };
+    const splitIndices = Object.values(rowIndices as Record<string, unknown>);
+    if (
+      splitIndices.length === 0 ||
+      !splitIndices.every(
+        (indices) => Array.isArray(indices) && indices.every(isValidIndex)
+      ) ||
+      !splitIndices.some((indices) => (indices as unknown[]).length > 0)
+    ) {
+      return [];
+    }
+    return ['quarantine'];
+  }
+  return [];
+}
 
-  const handleDownload = () => {
-    const fakeData = 'id,age,workclass,education,marital_status,occupation,capital_gain,income_target\nREC-001,39,State-gov,Bachelors,Never-married,Adm-clerical,0,<=50K\n';
-    const blob = new Blob([fakeData], { type: 'text/csv' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = repairResult?.downloadFilename || 'cleansed_dataset.csv';
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    success('Download Initialized', 'Corrected dataset exported.');
-  };
+function operationKey(findingId: string, operationType: FindingOperationType): string {
+  return `${operationType}:${findingId}`;
+}
+
+function getRecordedOperation(
+  findingId: string,
+  operationType: FindingOperationType,
+  history: DatasetOperationRecord[]
+): DatasetOperationRecord | undefined {
+  return history.find(
+    (operation) =>
+      operation.findingId === findingId &&
+      operation.operationType === operationType
+  );
+}
+
+interface RepairPageViewProps {
+  datasetId: string | null;
+  findings: PersistedFinding[];
+  history: DatasetOperationRecord[];
+  loading: boolean;
+  loadError: string | null;
+  operationError: string | null;
+  activeOperationKey: string | null;
+  onRunOperation: (finding: PersistedFinding, operationType: FindingOperationType) => void;
+  onRetry: () => void;
+}
+
+export const RepairPageView: React.FC<RepairPageViewProps> = ({
+  datasetId,
+  findings,
+  history,
+  loading,
+  loadError,
+  operationError,
+  activeOperationKey,
+  onRunOperation,
+  onRetry,
+}) => {
+  const completedHistory = history.filter(
+    (operation) => operation.status.toLowerCase() === 'completed'
+  );
 
   return (
-    <div className="space-y-6 max-w-4xl mx-auto animate-in fade-in duration-200">
-      {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <div>
-          <span className="text-xs font-mono text-teal-700 uppercase tracking-wider font-semibold">
-            Mitigation & Re-Evaluation
-          </span>
-          <h1 className="text-2xl font-bold tracking-tight text-slate-900 font-mono mt-1">
-            Repair & Evaluation
-          </h1>
-          <p className="text-xs text-slate-500 mt-1">
-            Quarantine leaked entity fingerprints, remove duplicate collisions, and retrain model baselines.
-          </p>
-        </div>
-
-        {retrainComplete && (
-          <button
-            onClick={() => navigate('/impact-analysis')}
-            className="px-4 py-2 text-xs font-semibold rounded-lg bg-teal-700 hover:bg-teal-800 text-white transition-colors flex items-center gap-2 shadow-xs"
-          >
-            <span>View Performance Impact</span>
-            <ArrowRight className="w-4 h-4" />
-          </button>
-        )}
-      </div>
-
-      {/* Workflow Chain Visual */}
-      <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-xs">
-        <span className="text-[10px] font-mono text-slate-500 uppercase tracking-wider block mb-2">
-          Sanitization Lifecycle
+    <div className="mx-auto max-w-5xl space-y-6">
+      <header>
+        <span className="text-xs font-mono font-semibold uppercase tracking-wider text-teal-700">
+          Evidence-based operations
         </span>
-        <div className="flex items-center justify-between overflow-x-auto text-xs font-mono">
-          <span className="text-slate-600">Original Dataset</span>
-          <span className="text-slate-400">→</span>
-          <span className="text-rose-600 font-semibold">Detected Issues</span>
-          <span className="text-slate-400">→</span>
-          <span className="text-teal-700 font-semibold">Quarantine & Repair</span>
-          <span className="text-slate-400">→</span>
-          <span className="text-emerald-600 font-semibold">Corrected Dataset</span>
-          <span className="text-slate-400">→</span>
-          <span className="text-slate-700">Retrain</span>
-          <span className="text-slate-400">→</span>
-          <span className="text-amber-600 font-semibold">Compare Inflation</span>
-        </div>
-      </div>
+        <h1 className="mt-1 text-2xl font-bold tracking-tight text-slate-900">
+          Repair &amp; Quarantine
+        </h1>
+        <p className="mt-2 text-sm text-slate-600">
+          Operations use persisted findings for this dataset. They create separate output files;
+          the uploaded original dataset is not modified.
+        </p>
+      </header>
 
-      {/* Step 1: Issue Selection List */}
-      <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-4 shadow-xs">
-        <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-          <div>
-            <h3 className="text-sm font-semibold text-slate-900">
-              Select Detected Issues for Repair / Quarantine
-            </h3>
-            <p className="text-xs text-slate-500">
-              Check findings to isolate from training and repartition test boundaries.
+      <section className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950">
+        <div className="flex items-start gap-2">
+          <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0" />
+          <div className="space-y-1">
+            <p>
+              Quarantine writes only the finding&apos;s affected rows to a separate output file.
+              Exact-duplicate repair writes a processed copy with later duplicate rows removed.
+            </p>
+            <p>
+              Downloads are not available yet: the current API returns operation metadata, not a
+              file response or a downloadable URL.
             </p>
           </div>
-          <span className="text-xs font-mono text-teal-700 font-semibold">
-            {items.filter((i) => i.selected).length} of {items.length} Selected
-          </span>
         </div>
+      </section>
 
-        <div className="space-y-2">
-          {items.map((item) => (
-            <div
-              key={item.id}
-              onClick={() => toggleItem(item.id)}
-              className={`p-3.5 rounded-lg border cursor-pointer transition-all flex items-start gap-3 ${
-                item.selected
-                  ? 'bg-teal-50/60 border-teal-300 shadow-2xs'
-                  : 'bg-slate-50/60 border-slate-200 hover:border-slate-300'
-              }`}
-            >
-              <input
-                type="checkbox"
-                checked={item.selected}
-                onChange={() => {}}
-                className="mt-0.5 w-4 h-4 rounded bg-white border-slate-300 text-teal-600 focus:ring-0"
-              />
-
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-xs font-semibold text-slate-900">{item.title}</span>
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs font-mono tabular-nums text-slate-700 font-bold">
-                      {item.count} samples
-                    </span>
-                    <SeverityBadge severity={item.severity} size="sm" />
-                  </div>
-                </div>
-
-                <p className="text-[11px] text-slate-500 mt-1">
-                  {item.description}
-                </p>
-
-                <div className="mt-2 flex items-center gap-2 text-[10px] font-mono">
-                  <span className="text-slate-500">Proposed Strategy:</span>
-                  <span className="px-1.5 py-0.5 rounded bg-white border border-slate-200 text-teal-800 uppercase font-semibold">
-                    {item.recommendedAction}
-                  </span>
-                </div>
-              </div>
-            </div>
-          ))}
-        </div>
-
-        <div className="pt-2 flex justify-end">
-          <button
-            onClick={handleCreateCorrected}
-            disabled={isRepairing}
-            className="px-4 py-2 text-xs font-semibold rounded-lg bg-teal-700 hover:bg-teal-800 disabled:opacity-50 text-white transition-colors flex items-center gap-2 shadow-xs"
-          >
-            <Wrench className="w-4 h-4" />
-            <span>{isRepairing ? 'Synthesizing Cleansed Folds...' : 'Create Corrected Dataset'}</span>
-          </button>
-        </div>
-      </div>
-
-      {/* Step 2: Repair Summary & Download */}
-      {repairResult && (
-        <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-4 animate-in fade-in duration-200 shadow-xs">
-          <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-            <div className="flex items-center gap-2">
-              <FileCheck className="w-5 h-5 text-emerald-600" />
-              <div>
-                <h3 className="text-sm font-semibold text-slate-900">
-                  Partition Repair Summary
-                </h3>
-                <p className="text-xs text-slate-500">
-                  Synthesized sanitized partition free of cross-boundary entity leaks.
-                </p>
-              </div>
-            </div>
-
-            <button
-              onClick={handleDownload}
-              className="px-3.5 py-1.5 text-xs font-semibold rounded-lg bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 transition-colors flex items-center gap-1.5 shadow-2xs"
-            >
-              <Download className="w-3.5 h-3.5 text-teal-700" />
-              <span>Download Corrected Dataset</span>
-            </button>
-          </div>
-
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-            <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
-              <span className="text-[11px] text-slate-500 block">Removed Duplicates</span>
-              <span className="text-lg font-bold font-mono text-rose-600 tabular-nums">
-                {repairResult.removedCount}
-              </span>
-            </div>
-            <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
-              <span className="text-[11px] text-slate-500 block">Quarantined Entities</span>
-              <span className="text-lg font-bold font-mono text-amber-600 tabular-nums">
-                {repairResult.quarantinedCount}
-              </span>
-            </div>
-            <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
-              <span className="text-[11px] text-slate-500 block">Retained Sanitized</span>
-              <span className="text-lg font-bold font-mono text-emerald-600 tabular-nums">
-                {repairResult.retainedCount.toLocaleString()}
-              </span>
-            </div>
-            <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
-              <span className="text-[11px] text-slate-500 block">Needs Review</span>
-              <span className="text-lg font-bold font-mono text-slate-700 tabular-nums">
-                0 remaining
-              </span>
-            </div>
-          </div>
-
-          {/* Retrain Model Action */}
-          <div className="pt-4 border-t border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <div>
-              <p className="text-xs font-semibold text-slate-900">
-                Execute Model Retraining
-              </p>
-              <p className="text-[11px] text-slate-500">
-                Retrain on sanitized folds to measure true generalization vs inflated metrics.
-              </p>
-            </div>
-
-            <button
-              onClick={handleRetrain}
-              disabled={isRetraining}
-              className="px-4 py-2 text-xs font-semibold rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white transition-colors flex items-center gap-1.5 self-start sm:self-auto shadow-xs"
-            >
-              <RotateCcw className={`w-3.5 h-3.5 ${isRetraining ? 'animate-spin' : ''}`} />
-              <span>{isRetraining ? 'Retraining Baseline...' : 'Retrain Model'}</span>
-            </button>
-          </div>
-
-          {/* Retrain Progress Bar */}
-          {isRetraining && (
-            <div className="p-4 bg-slate-50 border border-slate-200 rounded-lg space-y-2">
-              <div className="flex justify-between text-xs font-mono">
-                <span className="text-slate-700">{retrainMsg}</span>
-                <span className="text-teal-700 font-bold">{retrainProgress}%</span>
-              </div>
-              <div className="w-full h-1.5 bg-slate-200 rounded-full overflow-hidden">
-                <div
-                  className="h-full bg-teal-600 rounded-full transition-all duration-300"
-                  style={{ width: `${retrainProgress}%` }}
-                />
-              </div>
-            </div>
-          )}
-
-          {retrainComplete && (
-            <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-lg flex items-center justify-between">
-              <div className="flex items-center gap-2 text-xs text-emerald-900">
-                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                <span>Model retrained successfully. Ready to inspect evaluation performance drop.</span>
-              </div>
-              <button
-                onClick={() => navigate('/impact-analysis')}
-                className="text-xs text-emerald-800 hover:text-emerald-950 font-bold underline ml-2"
-              >
-                Inspect Impact →
-              </button>
-            </div>
-          )}
+      {!datasetId && !loading && (
+        <div role="alert" className="rounded-lg border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800">
+          No dataset identifier is available. Open this page from a dataset with a persisted ID.
         </div>
       )}
+
+      {loading && (
+        <div role="status" className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white p-5 text-sm text-slate-600">
+          <LoaderCircle className="h-4 w-4 animate-spin" />
+          Loading persisted findings and operation history…
+        </div>
+      )}
+
+      {!loading && loadError && (
+        <div role="alert" className="rounded-lg border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800">
+          <p>{loadError}</p>
+          <button
+            type="button"
+            onClick={onRetry}
+            className="mt-3 rounded border border-rose-300 bg-white px-3 py-1.5 text-xs font-semibold hover:bg-rose-100"
+          >
+            Retry loading
+          </button>
+        </div>
+      )}
+
+      {!loading && !loadError && datasetId && (
+        <>
+          {operationError && (
+            <div role="alert" className="rounded-lg border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800">
+              {operationError}
+            </div>
+          )}
+
+          <section className="space-y-3 rounded-xl border border-slate-200 bg-white p-5 shadow-xs">
+            <div className="flex items-center gap-2 border-b border-slate-100 pb-3">
+              <Wrench className="h-4 w-4 text-teal-700" />
+              <div>
+                <h2 className="text-sm font-semibold text-slate-900">Persisted findings</h2>
+                <p className="text-xs text-slate-500">Dataset ID: {datasetId}</p>
+              </div>
+            </div>
+
+            {findings.length === 0 ? (
+              <p className="rounded-lg bg-slate-50 p-4 text-sm text-slate-600">
+                No persisted findings are available for this dataset. An empty list does not
+                establish that every detector ran successfully.
+              </p>
+            ) : (
+              findings.map((finding) => {
+                const supportedOperations = getSupportedFindingOperations(finding, datasetId);
+                return (
+                  <article
+                    key={finding.id}
+                    className="rounded-lg border border-slate-200 p-4"
+                    data-testid={`finding-${finding.id}`}
+                  >
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <h3 className="text-sm font-semibold text-slate-900">
+                          {getFindingTypeLabel(finding.findingType)}
+                        </h3>
+                        <p className="mt-1 break-all font-mono text-[11px] text-slate-500">
+                          Finding ID: {finding.id}
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <SeverityBadge severity={finding.severity} size="sm" />
+                        <span className="rounded border border-slate-200 px-2 py-0.5 text-[10px] font-mono uppercase text-slate-600">
+                          {finding.status}
+                        </span>
+                      </div>
+                    </div>
+                    <p className="mt-3 text-sm text-slate-700">{finding.description}</p>
+                    {finding.createdAt && (
+                      <p className="mt-2 text-[11px] text-slate-500">
+                        Finding created: {finding.createdAt}
+                      </p>
+                    )}
+
+                    <div className="mt-4 flex flex-wrap gap-2">
+                      {supportedOperations.map((operationType) => {
+                        const recordedOperation = getRecordedOperation(
+                          finding.id,
+                          operationType,
+                          history
+                        );
+                        const active = activeOperationKey === operationKey(finding.id, operationType);
+                        const disabled = activeOperationKey !== null || recordedOperation !== undefined;
+                        const label =
+                          operationType === 'repair'
+                            ? 'Create duplicate-repaired copy'
+                            : 'Create quarantine output';
+
+                        return (
+                          <button
+                            key={operationType}
+                            type="button"
+                            disabled={disabled}
+                            onClick={() => onRunOperation(finding, operationType)}
+                            className="rounded-lg bg-teal-700 px-3 py-2 text-xs font-semibold text-white transition-colors hover:bg-teal-800 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            {active
+                              ? 'Operation in progress…'
+                              : recordedOperation
+                                ? `${label} (${recordedOperation.status})`
+                                : label}
+                          </button>
+                        );
+                      })}
+                      {supportedOperations.length === 0 && (
+                        <p className="text-xs text-slate-500">
+                          No automated operation is available. The finding type, dataset ID, and
+                          required deterministic row-index evidence must all be supported.
+                        </p>
+                      )}
+                    </div>
+                  </article>
+                );
+              })
+            )}
+          </section>
+
+          <section className="space-y-3 rounded-xl border border-slate-200 bg-white p-5 shadow-xs">
+            <div className="flex items-center gap-2 border-b border-slate-100 pb-3">
+              <Clock3 className="h-4 w-4 text-slate-600" />
+              <div>
+                <h2 className="text-sm font-semibold text-slate-900">Operation history</h2>
+                <p className="text-xs text-slate-500">Values below come from the backend operation records.</p>
+              </div>
+            </div>
+
+            {history.length === 0 ? (
+              <p className="rounded-lg bg-slate-50 p-4 text-sm text-slate-600">
+                No repair or quarantine operations are recorded for this dataset.
+              </p>
+            ) : (
+              history.map((operation) => (
+                <article
+                  key={operation.id}
+                  className="rounded-lg border border-slate-200 p-4"
+                  data-testid={`operation-${operation.id}`}
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <FileCheck2 className="h-4 w-4 text-teal-700" />
+                      <h3 className="text-sm font-semibold text-slate-900">
+                        {operation.operationType === 'quarantine'
+                          ? 'Quarantine output'
+                          : operation.operationType === 'repair'
+                            ? 'Exact-duplicate processed copy'
+                            : `Operation (${operation.operationType})`}
+                      </h3>
+                    </div>
+                    <span className="rounded border border-slate-200 px-2 py-0.5 text-[10px] font-mono uppercase text-slate-600">
+                      {operation.status}
+                    </span>
+                  </div>
+
+                  {operation.findingId && (
+                    <p className="mt-2 break-all font-mono text-[11px] text-slate-500">
+                      Finding ID: {operation.findingId}
+                    </p>
+                  )}
+                  {operation.outputFilename && (
+                    <p className="mt-2 break-all text-xs text-slate-700">
+                      Output filename: <span className="font-mono">{operation.outputFilename}</span>
+                    </p>
+                  )}
+                  {typeof operation.affectedRows === 'number' && operation.affectedRows > 0 && (
+                    <p className="mt-1 text-xs text-slate-700">
+                      {operation.operationType === 'quarantine'
+                        ? 'Rows written to separate quarantine output'
+                        : 'Later duplicate rows removed from processed copy'}
+                      : <span className="font-mono">{operation.affectedRows}</span>
+                    </p>
+                  )}
+                  {!(typeof operation.affectedRows === 'number' && operation.affectedRows > 0) && (
+                    <p className="mt-1 text-xs text-slate-500">
+                      Affected-row count was not available in this operation response.
+                    </p>
+                  )}
+                  {operation.inputFileSha256 && (
+                    <p className="mt-2 break-all text-[11px] text-slate-500">
+                      Input SHA-256: <code>{operation.inputFileSha256}</code>
+                    </p>
+                  )}
+                  {operation.outputFileSha256 && (
+                    <p className="mt-1 break-all text-[11px] text-slate-500">
+                      Output SHA-256: <code>{operation.outputFileSha256}</code>
+                    </p>
+                  )}
+                  {operation.createdAt && (
+                    <p className="mt-2 text-[11px] text-slate-500">
+                      Created: {operation.createdAt}
+                    </p>
+                  )}
+                  {operation.completedAt && (
+                    <p className="mt-1 text-[11px] text-slate-500">
+                      Completed: {operation.completedAt}
+                    </p>
+                  )}
+                </article>
+              ))
+            )}
+          </section>
+
+          {completedHistory.length > 0 && (
+            <p className="text-xs text-slate-500">
+              Completed operations are shown as records only. This page does not retrain models or
+              evaluate performance.
+            </p>
+          )}
+        </>
+      )}
     </div>
+  );
+};
+
+export const RepairPage: React.FC = () => {
+  const { id } = useParams<{ id: string }>();
+  const [findings, setFindings] = useState<PersistedFinding[]>([]);
+  const [history, setHistory] = useState<DatasetOperationRecord[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [operationError, setOperationError] = useState<string | null>(null);
+  const [activeOperationKey, setActiveOperationKey] = useState<string | null>(null);
+  const [retryCount, setRetryCount] = useState(0);
+  const operationInFlight = useRef(false);
+
+  useEffect(() => {
+    let current = true;
+    setOperationError(null);
+    if (!id?.trim()) {
+      setFindings([]);
+      setHistory([]);
+      setLoadError(null);
+      setLoading(false);
+      return () => {
+        current = false;
+      };
+    }
+
+    setLoading(true);
+    setLoadError(null);
+    Promise.all([getFindings(id), getDatasetOperationHistory(id)])
+      .then(([persistedFindings, operationHistory]) => {
+        if (current) {
+          setFindings(persistedFindings);
+          setHistory(operationHistory);
+        }
+      })
+      .catch((error: unknown) => {
+        if (current) {
+          setLoadError(
+            error instanceof Error ? error.message : 'Failed to load persisted repair data.'
+          );
+        }
+      })
+      .finally(() => {
+        if (current) setLoading(false);
+      });
+
+    return () => {
+      current = false;
+    };
+  }, [id, retryCount]);
+
+  const handleRunOperation = useCallback(
+    async (finding: PersistedFinding, operationType: FindingOperationType) => {
+      if (
+        !id ||
+        !getSupportedFindingOperations(finding, id).includes(operationType) ||
+        operationInFlight.current ||
+        getRecordedOperation(finding.id, operationType, history)
+      ) {
+        return;
+      }
+
+      operationInFlight.current = true;
+      setActiveOperationKey(operationKey(finding.id, operationType));
+      setOperationError(null);
+      try {
+        const result =
+          operationType === 'repair'
+            ? await repairFinding(finding.id)
+            : await quarantineFinding(finding.id);
+
+        if (
+          result.datasetId !== id ||
+          result.findingId !== finding.id ||
+          result.operationType !== operationType
+        ) {
+          throw new Error('Backend returned an operation that does not match the requested finding.');
+        }
+        setHistory((previous) => [
+          result,
+          ...previous.filter((operation) => operation.id !== result.id),
+        ]);
+      } catch (error) {
+        setOperationError(
+          error instanceof Error ? error.message : `Failed to ${operationType} this finding.`
+        );
+      } finally {
+        operationInFlight.current = false;
+        setActiveOperationKey(null);
+      }
+    },
+    [history, id]
+  );
+
+  return (
+    <RepairPageView
+      datasetId={id ?? null}
+      findings={findings}
+      history={history}
+      loading={loading}
+      loadError={loadError}
+      operationError={operationError}
+      activeOperationKey={
+        activeOperationKey
+          ? activeOperationKey
+          : operationInFlight.current
+            ? 'pending'
+            : null
+      }
+      onRunOperation={handleRunOperation}
+      onRetry={() => setRetryCount((count) => count + 1)}
+    />
   );
 };

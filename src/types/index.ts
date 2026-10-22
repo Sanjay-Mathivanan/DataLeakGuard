@@ -16,22 +16,35 @@ export interface CVStats {
   nearDuplicatePairsCount: number;
 }
 
+/** Basic image-ZIP profile fields returned by the backend profiler. */
+export interface DatasetProfile {
+  imageCount?: number;
+  format?: string;
+  widthMin?: number | null;
+  widthMax?: number | null;
+  heightMin?: number | null;
+  heightMax?: number | null;
+  sampledImages?: number;
+  error?: string;
+}
+
 export interface Dataset {
   id: string;
   name: string;
   type: DatasetType;
   format: 'CSV' | 'XLSX' | 'ZIP' | 'YOLO' | 'COCO';
-  sampleCount: number;
-  featureCount: number;
-  classCount: number;
-  status: IntegrityStatus;
+  sampleCount?: number | null;
+  featureCount?: number | null;
+  classCount?: number | null;
+  status?: string | null;
   issuesCount: number;
   uploadedAt: string;
-  lastAnalysis: string;
-  description: string;
+  lastAnalysis?: string | null;
+  description?: string | null;
   previewRows?: Record<string, string | number>[];
   columns?: { name: string; type: string; missingCount: number; uniqueCount: number }[];
-  cvStats?: CVStats;
+  cvStats?: CVStats | null;
+  profile?: DatasetProfile | null;
 }
 
 export type LeakageType = 
@@ -71,12 +84,30 @@ export interface LeakageCategoryOverview {
   shortExplanation: string;
 }
 
+/** Finding fields returned by the persisted backend findings API. */
+export interface PersistedFinding {
+  id: string;
+  datasetId: string;
+  findingType: string;
+  severity: string;
+  status: string;
+  description: string;
+  evidence: Record<string, unknown> | null;
+  createdAt: string | null;
+}
+
+/** A count derived only from persisted findings; it does not imply detector coverage. */
+export interface FindingCategorySummary {
+  findingType: string;
+  label: string;
+  findingsCount: number;
+}
+
 export interface AnalysisStage {
   id: number;
   name: string;
   status: 'pending' | 'running' | 'completed' | 'failed';
-  findingsCount: number;
-  durationMs: number;
+  findingsCount?: number;
   description: string;
 }
 
@@ -88,41 +119,25 @@ export interface AnalysisResult {
   summary: {
     totalFindings: number;
     duplicateFindings: number;
-    entityFindings: number;
-    targetFindings: number;
-    temporalFindings: number;
-    preprocessingFindings: number;
-    contaminationFindings: number;
-    cvNearDuplicates: number;
-    labelAnomalies: number;
-    oodSamples: number;
-    overallRiskScore: number; // 0 - 100
-    overallRiskLevel: RiskLevel;
   };
 }
 
-export interface RepairItem {
-  id: string;
-  findingId: string;
-  type: LeakageType;
-  title: string;
-  description: string;
-  count: number;
-  severity: SeverityLevel;
-  recommendedAction: 'quarantine' | 'remove' | 'repartition' | 'sanitize';
-  selected: boolean;
-}
+export type FindingOperationType = 'repair' | 'quarantine';
 
-export interface RepairResult {
+/** Fields returned by the persisted repair/quarantine operation APIs. */
+export interface DatasetOperationRecord {
   id: string;
   datasetId: string;
-  originalCount: number;
-  removedCount: number;
-  quarantinedCount: number;
-  retainedCount: number;
-  reviewedCount: number;
-  completedAt: string;
-  downloadFilename: string;
+  findingId?: string | null;
+  operationType: string;
+  status: string;
+  inputFile?: string | null;
+  inputFileSha256?: string | null;
+  outputFilename?: string | null;
+  outputFileSha256?: string | null;
+  affectedRows?: number | null;
+  createdAt?: string | null;
+  completedAt?: string | null;
 }
 
 export interface Model {

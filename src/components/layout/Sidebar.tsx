@@ -4,8 +4,6 @@ import {
   ShieldAlert,
   LayoutDashboard,
   Database,
-  Search,
-  Wrench,
   Cpu,
   KeyRound,
   GitCompare,
@@ -28,9 +26,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen, onClose }) => {
 
   const navItems = [
     { label: 'Dashboard', to: '/dashboard', icon: LayoutDashboard },
-    { label: 'Datasets', to: '/datasets', icon: Database },
-    { label: 'Leakage Analysis', to: '/leakage-analysis/ds-adult-income', icon: Search },
-    { label: 'Repair & Evaluation', to: '/repair/ds-adult-income', icon: Wrench },
+    { label: 'Datasets & Integrity Workflows', to: '/datasets', icon: Database },
     { label: 'Model Integrity', to: '/model-integrity', icon: Cpu },
     { label: 'Inference Provenance', to: '/inference-provenance', icon: KeyRound },
     { label: 'Distribution Shift', to: '/distribution-shift', icon: GitCompare },

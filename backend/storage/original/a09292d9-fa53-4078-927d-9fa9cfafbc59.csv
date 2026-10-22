@@ -1,0 +1,5 @@
+id,feature,target,leaked_feature
+1,A,1,1
+2,B,0,0
+3,C,1,1
+4,D,0,0

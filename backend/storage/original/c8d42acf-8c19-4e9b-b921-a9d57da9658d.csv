@@ -1,0 +1,5 @@
+id,entity,feature1,feature2,split
+1,X,A,10,train
+2,X,A,10,test
+3,Y,B,20,train
+4,Y,C,30,test

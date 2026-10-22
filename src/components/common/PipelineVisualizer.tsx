@@ -2,6 +2,7 @@ import React from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Database, ShieldCheck, Cpu, KeyRound, GitCompare, FileText, ChevronRight } from 'lucide-react';
 import { StatusBadge } from './StatusBadge';
+import { getDatasetWorkflowPath } from '../../services/datasetNavigation';
 
 interface StageInfo {
   id: string;
@@ -29,7 +30,7 @@ export const PipelineVisualizer: React.FC = () => {
     {
       id: 'data-integrity',
       name: 'Data Integrity & Leakage',
-      route: '/leakage-analysis/ds-adult-income',
+      route: getDatasetWorkflowPath('findings'),
       icon: ShieldCheck,
       status: 'Issues Found',
       findingsCount: 214,
@@ -79,11 +80,12 @@ export const PipelineVisualizer: React.FC = () => {
         <div>
           <h3 className="text-sm font-semibold text-slate-900">End-to-End Pipeline Integrity Chain</h3>
           <p className="text-xs text-slate-500">
-            Click any pipeline stage to inspect detailed evidence, artifacts, and verification logs.
+            This illustrative pipeline includes mock status/count values. Select a dataset to open
+            backend-backed profiling, findings, and repair/quarantine workflows.
           </p>
         </div>
         <span className="text-[11px] font-mono text-teal-800 bg-teal-50 border border-teal-200 px-2 py-0.5 rounded self-start font-medium">
-          Connected Architecture
+          Illustrative mock data
         </span>
       </div>
 

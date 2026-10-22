@@ -1,0 +1,5 @@
+event_date,split
+2025-01-01,train
+2025-01-10,train
+2025-01-10,test
+2025-01-20,test

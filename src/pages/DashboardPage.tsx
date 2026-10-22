@@ -35,6 +35,7 @@ import { StatusBadge } from '../components/common/StatusBadge';
 import { SeverityBadge } from '../components/common/SeverityBadge';
 import { CardSkeleton, TableSkeleton } from '../components/common/LoadingSkeleton';
 import { getDashboardStats, getActivities } from '../services/api';
+import { getDatasetWorkflowPath } from '../services/datasetNavigation';
 import { Activity } from '../types';
 
 export const DashboardPage: React.FC = () => {
@@ -371,11 +372,11 @@ export const DashboardPage: React.FC = () => {
                   <td className="px-5 py-3 text-right whitespace-nowrap">
                     <button
                       onClick={() => {
-                        if (act.targetId?.startsWith('ds-')) navigate(`/datasets/${act.targetId}`);
+                        if (act.targetId?.startsWith('ds-')) navigate(getDatasetWorkflowPath('dataset'));
                         else if (act.targetId?.startsWith('PRV-')) navigate('/inference-provenance');
                         else if (act.targetId?.startsWith('mdl-')) navigate('/model-integrity');
                         else if (act.targetId?.startsWith('REP-')) navigate(`/reports/${act.targetId}`);
-                        else navigate('/leakage-analysis/ds-adult-income');
+                        else navigate(getDatasetWorkflowPath('findings'));
                       }}
                       className="text-teal-700 hover:text-teal-800 font-semibold inline-flex items-center gap-1"
                     >

@@ -1,0 +1,5 @@
+id,feature1,feature2,split
+1,A,10,train
+2,B,20,train
+3,C,30,test
+4,A,10,test

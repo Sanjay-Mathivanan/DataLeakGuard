@@ -171,8 +171,8 @@ def detect_entity_overlap(
     split_series = df[split_column].astype(str).str.strip().str.lower()
 
     # Mask for non-empty entity values and non-empty split values
-    non_empty_entity_mask = entity_series != ''
-    non_empty_split_mask = split_series != ''
+    non_empty_entity_mask = df[entity_column].notna() & (entity_series != '')
+    non_empty_split_mask = df[split_column].notna() & (split_series != '')
     combined_mask = non_empty_entity_mask & non_empty_split_mask
 
     # We'll only consider rows with non-empty entity and split values
@@ -206,94 +206,61 @@ def detect_entity_overlap(
             "row_indices": group.index.tolist()
         }
 
-    # Check for entity overlap between splits
-    # For conventional case: train -> test, validation -> test, etc.
-    # We'll check all pairs of entities where one should temporally precede the other
-    entity_values = list(entity_splits.keys())
+    # Check for entity overlap: each entity appearing in more than one split
+    findings_to_commit = []
+    findings_to_return = []
 
-    # Define conventional order (earlier to later)
-    conventional_order = ["train", "validation", "val", "test"]
+    for entity_value, split_info in entity_splits.items():
+        # Check if this entity appears in more than one split
+        if split_info["split_count"] > 1:
+            # Build evidence for entity overlap
+            evidence = {
+                "entity_column": entity_column,
+                "split_column": split_column,
+                "entity_value": entity_value,
+                "splits": split_info["splits"],
+                "row_indices": {split: [int(idx) for idx in split_info["row_indices"]
+                                  if split_series_filtered.loc[idx] == split]
+                               for split in split_info["splits"]}
+            }
 
-    # Check each pair of entities
-    for i, entity1 in enumerate(entity_values):
-        for j, entity2 in enumerate(entity_values):
-            if i >= j:  # Avoid duplicate pairs and self-pairs
-                continue
+            # Check if a finding with this evidence already exists
+            existing = db.query(leakage_models.LeakageFinding).filter(
+                leakage_models.LeakageFinding.dataset_id == dataset_id,
+                leakage_models.LeakageFinding.finding_type == "entity_overlap",
+                leakage_models.LeakageFinding.evidence == evidence
+            ).first()
 
-            # Determine which entity should come first based on conventional ordering
-            # If both entities are in conventional order, use that
-            # Otherwise, use alphabetical order as fallback
-            entity1_order = conventional_order.index(entity1) if entity1 in conventional_order else len(conventional_order) + entity_values.index(entity1)
-            entity2_order = conventional_order.index(entity2) if entity2 in conventional_order else len(conventional_order) + entity_values.index(entity2)
-
-            # If entity1 should come before entity2
-            if entity1_order < entity2_order:
-                earlier_entity = entity1
-                later_entity = entity2
-            else:
-                earlier_entity = entity2
-                later_entity = entity1
-
-            # Get split sets
-            earlier_splits = set(entity_splits[earlier_entity]["splits"])
-            later_splits = set(entity_splits[later_entity]["splits"])
-
-            # Check for split overlap: any split appears in both entities
-            split_overlap = earlier_splits.intersection(later_splits)
-
-            if split_overlap:
-                # Build evidence for entity overlap
-                evidence = {
-                    "entity_column": entity_column,
-                    "split_column": split_column,
-                    "detection": "entity_overlap",
-                    "entities": {
-                        earlier_entity: entity_splits[earlier_entity],
-                        later_entity: entity_splits[later_entity]
-                    },
-                    "overlapping_splits": list(split_overlap)
+            if existing:
+                # Update created_at to now (refresh)
+                existing.created_at = pd.Timestamp.utcnow()
+                db.add(existing)
+                # Building finding dict from existing finding
+                finding_dict = {
+                    "id": str(existing.id),
+                    "dataset_id": str(existing.dataset_id),
+                    "finding_type": existing.finding_type,
+                    "severity": existing.severity,
+                    "status": existing.status,
+                    "description": existing.description,
+                    "evidence": existing.evidence,
+                    "created_at": existing.created_at.isoformat() if existing.created_at else None
                 }
-
-                # Check if a finding with this evidence already exists
-                existing = db.query(leakage_models.LeakageFinding).filter(
-                    leakage_models.LeakageFinding.dataset_id == dataset_id,
-                    leakage_models.LeakageFinding.finding_type == "entity_overlap",
-                    leakage_models.LeakageFinding.evidence == evidence
-                ).first()
-
-                if existing:
-                    # Update created_at to now (refresh)
-                    existing.created_at = pd.Timestamp.utcnow()
-                    db.add(existing)
-                    # Building finding dict from existing finding
-                    finding_dict = {
-                        "id": str(existing.id),
-                        "dataset_id": str(existing.dataset_id),
-                        "finding_type": existing.finding_type,
-                        "severity": existing.severity,
-                        "status": existing.status,
-                        "description": existing.description,
-                        "evidence": existing.evidence,
-                        "created_at": existing.created_at.isoformat() if existing.created_at else None
-                    }
-                    findings_to_return.append(finding_dict)
-                else:
-                    # Create new finding
-                    if len(split_overlap) == 1:
-                        description = f"Entity overlap detected: entity '{earlier_entity}' and entity '{later_entity}' share split '{list(split_overlap)[0]}'."
-                    else:
-                        description = f"Entity overlap detected: entity '{earlier_entity}' and entity '{later_entity}' share splits {list(split_overlap)}."
-
-                    finding = leakage_models.LeakageFinding(
-                        dataset_id=dataset_id,
-                        finding_type="entity_overlap",
-                        severity="high",
-                        status="open",
-                        description=description,
-                        evidence=evidence
-                    )
-                    db.add(finding)
-                    findings_to_commit.append(finding)
+                findings_to_return.append(finding_dict)
+            else:
+                # Create new finding
+                splits_str = ", ".join(sorted(split_info["splits"]))
+                description = f"Entity '{entity_value}' appears in multiple splits: {splits_str}."
+                finding = leakage_models.LeakageFinding(
+                    dataset_id=dataset_id,
+                    finding_type="entity_overlap",
+                    severity="high",
+                    status="open",
+                    description=description,
+                    evidence=evidence
+                )
+                db.add(finding)
+                findings_to_commit.append(finding)
 
     # Commit the new findings
     db.commit()
@@ -354,11 +321,12 @@ def detect_target_leakage(
             detail=f"Target column '{target_column}' not found in dataset columns"
         )
 
-    # Normalize target values: strip whitespace, treat null/empty as missing
-    target_series = df[target_column].astype(str).str.strip()
-
-    # Mask for non-empty target values
-    non_empty_target_mask = target_series != ''
+    # Normalize valid target values while checking nulls before string conversion.
+    # Converting nulls first would turn them into strings such as "nan".
+    target_series = df[target_column].astype("string").str.strip()
+    non_empty_target_mask = (
+        df[target_column].notna() & target_series.ne("").fillna(False)
+    )
     df_filtered = df[non_empty_target_mask].copy()
     target_series_filtered = target_series[non_empty_target_mask]
 
@@ -379,9 +347,16 @@ def detect_target_leakage(
         if column == target_column:
             continue  # Skip the target column itself
 
-        # Get feature and target series
-        feature_series = df_filtered[column]
-        target_series = target_series_filtered
+        # Exclude null and whitespace-only feature values before constructing
+        # mappings. Keep nonblank feature values unchanged for the evidence.
+        raw_feature_series = df_filtered[column]
+        feature_value_strings = raw_feature_series.astype("string")
+        valid_feature_mask = (
+            raw_feature_series.notna()
+            & feature_value_strings.str.strip().ne("").fillna(False)
+        )
+        feature_series = raw_feature_series[valid_feature_mask]
+        target_series = target_series_filtered[valid_feature_mask]
 
         # Check if feature column has sufficient variation
         # Skip columns where all values are the same (likely ID columns)
@@ -398,12 +373,8 @@ def detect_target_leakage(
         is_deterministic_mapping = True
         conflicting_mappings = {}
 
-        # Iterate through rows to build mapping
-        for idx, (feature_val, target_val) in enumerate(zip(feature_series, target_series)):
-            # Skip if either value is empty
-            if feature_val == '' or target_val == '':
-                continue
-
+        # Iterate through rows with valid feature/target pairs to build mapping
+        for feature_val, target_val in zip(feature_series, target_series):
             if feature_val in mapping:
                 # Check for consistency
                 if mapping[feature_val] != target_val:
@@ -415,57 +386,63 @@ def detect_target_leakage(
             else:
                 mapping[feature_val] = target_val
 
-        # Check for exact target duplication
-        if is_exact_duplicate and len(mapping) > 0:
-            # All feature values map to the same target value
-            # This means the feature column exactly duplicates the target column
-            unique_targets = set(mapping.values())
-            if len(unique_targets) == 1:
-                # Build evidence for exact target duplication
-                evidence = {
-                    "target_column": target_column,
-                    "feature_column": column,
-                    "detection": "exact_target_duplicate",
-                    "matching_rows": len(df_filtered),
-                    "total_valid_rows": len(df_filtered)
+        # Check for exact target duplication: feature column values identical to target column values
+        # Compare the actual values directly, not the mapping
+        feature_values = feature_series.tolist()
+        target_values = target_series.tolist()
+
+        # Check if feature column exactly matches target column
+        if feature_values == target_values and len(feature_values) > 0:
+            # Build evidence for exact target duplication
+            evidence = {
+                "target_column": target_column,
+                "feature_column": column,
+                "detection": "exact_target_duplicate",
+                "matching_rows": len(feature_series),
+                "total_valid_rows": len(feature_series)
+            }
+
+            # Check if a finding with this evidence already exists
+            existing = db.query(leakage_models.LeakageFinding).filter(
+                leakage_models.LeakageFinding.dataset_id == dataset_id,
+                leakage_models.LeakageFinding.finding_type == "target_leakage",
+                leakage_models.LeakageFinding.evidence == evidence
+            ).first()
+
+            if existing:
+                # Update created_at to now (refresh)
+                existing.created_at = pd.Timestamp.utcnow()
+                db.add(existing)
+                # Build finding dict from existing finding
+                finding_dict = {
+                    "id": str(existing.id),
+                    "dataset_id": str(existing.dataset_id),
+                    "finding_type": existing.finding_type,
+                    "severity": existing.severity,
+                    "status": existing.status,
+                    "description": existing.description,
+                    "evidence": existing.evidence,
+                    "created_at": existing.created_at.isoformat() if existing.created_at else None
                 }
+                findings_to_return.append(finding_dict)
+            else:
+                # Create new finding
+                description = f"Feature column '{column}' exactly duplicates the target column '{target_column}'."
+                finding = leakage_models.LeakageFinding(
+                    dataset_id=dataset_id,
+                    finding_type="target_leakage",
+                    severity="high",
+                    status="open",
+                    description=description,
+                    evidence=evidence
+                )
+                db.add(finding)
+                findings_to_commit.append(finding)
 
-                # Check if a finding with this evidence already exists
-                existing = db.query(leakage_models.LeakageFinding).filter(
-                    leakage_models.LeakageFinding.dataset_id == dataset_id,
-                    leakage_models.LeakageFinding.finding_type == "target_leakage",
-                    leakage_models.LeakageFinding.evidence == evidence
-                ).first()
-
-                if existing:
-                    # Update created_at to now (refresh)
-                    existing.created_at = pd.Timestamp.utcnow()
-                    db.add(existing)
-                    # Build finding dict from existing finding
-                    finding_dict = {
-                        "id": str(existing.id),
-                        "dataset_id": str(existing.dataset_id),
-                        "finding_type": existing.finding_type,
-                        "severity": existing.severity,
-                        "status": existing.status,
-                        "description": existing.description,
-                        "evidence": existing.evidence,
-                        "created_at": existing.created_at.isoformat() if existing.created_at else None
-                    }
-                    findings_to_return.append(finding_dict)
-                else:
-                    # Create new finding
-                    description = f"Feature column '{column}' exactly duplicates the target column '{target_column}'."
-                    finding = leakage_models.LeakageFinding(
-                        dataset_id=dataset_id,
-                        finding_type="target_leakage",
-                        severity="high",
-                        status="open",
-                        description=description,
-                        evidence=evidence
-                    )
-                    db.add(finding)
-                    findings_to_commit.append(finding)
+            # Reset flags to prevent fall-through to deterministic mapping check
+            is_exact_duplicate = False
+            is_deterministic_mapping = False
+            conflicting_mappings = {}
 
         # Check for deterministic feature -> target mapping
         elif is_deterministic_mapping and len(mapping) > 0 and len(conflicting_mappings) == 0:
@@ -477,11 +454,10 @@ def detect_target_leakage(
             # Apply conservative evidence requirements:
             # - Feature must have at least 2 distinct non-null values
             # - Target must have at least 2 distinct non-null values
-            # - All valid feature values must map to exactly one target value
+            # - Every valid feature value must map consistently to one target
             # - At least 2 distinct target groups must be represented
             # - Target column itself is never flagged
             if (len(unique_feature_values) >= 2 and
-                len(unique_target_values) >= 2 and
                 len(unique_target_values) >= 2):
 
                 # Build evidence for deterministic mapping
@@ -509,12 +485,12 @@ def detect_target_leakage(
                     finding_dict = {
                         "id": str(existing.id),
                         "dataset_id": str(existing.dataset_id),
-                        "finding_type": finding.finding_type,
-                        "severity": finding.severity,
-                        "status": finding.status,
-                        "description": finding.description,
-                        "evidence": finding.evidence,
-                        "created_at": finding.created_at.isoformat() if finding.created_at else None
+                        "finding_type": existing.finding_type,
+                        "severity": existing.severity,
+                        "status": existing.status,
+                        "description": existing.description,
+                        "evidence": existing.evidence,
+                        "created_at": existing.created_at.isoformat() if existing.created_at else None
                     }
                     findings_to_return.append(finding_dict)
                 else:
@@ -822,9 +798,6 @@ def detect_train_test_contamination(
             detail=f"No valid split values found in column '{split_column}'"
         )
 
-    # Determine if any rows were filtered out due to null/empty split values
-    rows_filtered_out = len(df) - len(df_filtered)
-
     # Calculate column_count (original columns excluding split column)
     column_count = len(df_filtered.columns) - 1  # All columns except split column
 
@@ -847,9 +820,6 @@ def detect_train_test_contamination(
     # List to hold finding dicts for existing findings (which already have IDs)
     findings_to_return = []
 
-    # DEBUG: Print when function is called
-    print(f"DEBUG detect_train_test_contamination called for dataset_id={dataset_id}, split_column={split_column}")
-
     # Process each group of rows with the same hash
     for row_hash, group in grouped:
         # Get the split values for this group
@@ -860,93 +830,17 @@ def detect_train_test_contamination(
         # Create a contamination finding ONLY when:
         # number of distinct splits > 1
         if split_count > 1:
-            # Get original dataframe indices for this group
-            original_indices = [int(idx) for idx in group.index]
-
-            # Apply the logic discovered through test analysis:
-            if rows_filtered_out > 0:
-                # Case: rows were filtered out due to null/empty split values
-                # Show position within each split's group
-                row_indices_data = {}
-
-                # Pre-compute the positions of each split value in the full df_filtered
-                split_positions = {}
-                for split_val in sorted(unique_splits):
-                    # Find all indices in df_filtered where this split value occurs
-                    positions = [
-                        int(idx) for idx in split_series_filtered.index[
-                            split_series_filtered == split_val
-                        ]
-                    ]
-                    split_positions[split_val] = positions
-
-                # For each split value in the contamination group, find its positions
-                for split_value in sorted(unique_splits):
-                    # Find which rows in the group have this split value
-                    group_rows_with_split = [
-                        int(i) for i, val in enumerate(group_split_series)
-                        if val == split_value
-                    ]
-
-                    # For each such row, get its position within all rows of that split
-                    positions_in_split = []
-                    for group_row_idx in group_rows_with_split:
-                        # Get the actual index in df_filtered
-                        df_filtered_idx = int(group.index[group_row_idx])
-                        # Find the position of this df_filtered_idx within all rows of this split
-                        position_in_split = int(split_positions[split_value].index(df_filtered_idx))
-                        positions_in_split.append(position_in_split)
-
-                    row_indices_data[split_value] = positions_in_split
-
-            elif len(unique_splits) == 2:
-                # Special case for exactly 2 splits:
-                # Check if contamination group includes ALL rows or just a subset
-                # Get total rows in df_filtered
-                total_rows_in_filtered = len(df_filtered)
-                contamination_group_size = len(group)
-
-                if contamination_group_size == total_rows_in_filtered:
-                    # Contamination group includes ALL rows -> show precise per split
-                    # For each split, show the original indices where canonical row appears AND is in that split
-                    row_indices_data = {}
-                    for split_value in sorted(unique_splits):
-                        # Find indices in the group where split equals this value
-                        indices_in_group = [
-                            int(group.index[i]) for i, val in enumerate(group_split_series)
-                            if val == split_value
-                        ]
-                        row_indices_data[split_value] = indices_in_group
-                else:
-                    # Contamination group is a SUBSET -> show union (all canonical row indices, duplicated)
-                    # Get all original indices where canonical row appears
-                    all_canonical_indices = original_indices.copy()
-                    row_indices_data = {}
-                    for split_value in sorted(unique_splits):
-                        row_indices_data[split_value] = all_canonical_indices.copy()
-
-            else:
-                # Case: more than 2 splits OR (2 splits but we didn't match above conditions)
-                # Show position within contamination group for each split
-                row_indices_data = {}
-                # Create a mapping from group position to original index for easy lookup
-                group_pos_to_orig_idx = {int(i): int(group.index[i]) for i in range(len(group.index))}
-
-                for split_value in sorted(unique_splits):
-                    # Find which rows in the group have this split value
-                    group_rows_with_split = [
-                        int(i) for i, val in enumerate(group_split_series)
-                        if val == split_value
-                    ]
-
-                    # For each such row, get its position within the contamination group
-                    positions_in_group = []
-                    for group_row_idx in group_rows_with_split:
-                        # Position of this row within the contamination group (0-based)
-                        position_in_group = int(group_rows_with_split.index(group_row_idx))
-                        positions_in_group.append(position_in_group)
-
-                    row_indices_data[split_value] = positions_in_group
+            # Evidence indices are zero-based source dataframe row positions, not
+            # positions within a filtered split or hash group. Quarantine applies
+            # them to the original dataframe with iloc.
+            row_indices_data = {
+                split_value: [
+                    int(row_index)
+                    for row_index, row_split in group_split_series.items()
+                    if row_split == split_value
+                ]
+                for split_value in sorted(unique_splits)
+            }
 
             # Build evidence for train/test contamination
             evidence = {

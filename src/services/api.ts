@@ -1,11 +1,11 @@
 /**
  * DataLeakGuard-CV Mock API Service Layer
- * 
+ *
  * NOTE FOR BACKEND INTEGRATION:
  * This module is designed to be a direct 1:1 drop-in replacement for a FastAPI backend.
  * Each function returns a Promise. When migrating to FastAPI:
  * Replace mock storage updates with standard `fetch('/api/v1/...')` calls.
- * 
+ *
  * Example:
  * export async function getDatasets(): Promise<Dataset[]> {
  *   const res = await fetch('/api/v1/datasets');
@@ -15,12 +15,12 @@
 
 import {
   Dataset,
-  LeakageFinding,
-  LeakageCategoryOverview,
+  PersistedFinding,
+  FindingCategorySummary,
   AnalysisResult,
   AnalysisStage,
-  RepairItem,
-  RepairResult,
+  DatasetOperationRecord,
+  FindingOperationType,
   Model,
   InferenceRecord,
   DistributionShift,
@@ -30,7 +30,6 @@ import {
 } from '../types';
 
 import { initialDatasets } from '../data/mockDatasets';
-import { mockCategoryOverviews, mockDetailedFindings } from '../data/mockFindings';
 import { initialModels } from '../data/mockModels';
 import { initialInferenceRecords } from '../data/mockInference';
 import { mockImpactData, mockDistributionShiftData } from '../data/mockImpact';
@@ -39,7 +38,6 @@ import { initialActivities } from '../data/mockActivities';
 
 // In-memory state holding dynamic modifications
 let datasetsStore: Dataset[] = [...initialDatasets];
-let findingsStore: LeakageFinding[] = [...mockDetailedFindings];
 let modelsStore: Model[] = [...initialModels];
 let inferenceStore: InferenceRecord[] = [...initialInferenceRecords];
 let reportsStore: AssuranceReport[] = [...initialReports];
@@ -47,80 +45,149 @@ let activitiesStore: Activity[] = [...initialActivities];
 
 const delay = (ms = 400) => new Promise((resolve) => setTimeout(resolve, ms));
 
+const toCamelCase = (obj: any): any => {
+  if (obj === null || typeof obj !== 'object') return obj;
+  if (Array.isArray(obj)) {
+    return obj.map(toCamelCase);
+  }
+  return Object.keys(obj).reduce((acc, key) => {
+    const camelKey = key.replace(/_([a-z])/g, (_, character) => character.toUpperCase());
+    // @ts-ignore
+    // Dataset preview row keys are user-provided column names, not API field
+    // names. Preserve them verbatim so they continue matching `columns[].name`.
+    acc[camelKey] = key === 'preview_rows' ? obj[key] : toCamelCase((obj as any)[key]);
+    return acc;
+  }, {});
+};
+
+const getApiBaseUrl = (): string =>
+  (import.meta.env?.VITE_API_BASE_URL || '/api/v1').replace(/\/+$/, '');
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === 'object' && !Array.isArray(value);
+
+const requireString = (finding: Record<string, unknown>, field: string): string => {
+  const value = finding[field];
+  if (typeof value !== 'string') {
+    throw new Error(`Invalid finding response: expected "${field}" to be a string`);
+  }
+  return value;
+};
+
+export function mapPersistedFinding(value: unknown): PersistedFinding {
+  if (!isRecord(value)) {
+    throw new Error('Invalid finding response: expected an object');
+  }
+
+  return {
+    id: requireString(value, 'id'),
+    datasetId: requireString(value, 'dataset_id'),
+    findingType: requireString(value, 'finding_type'),
+    severity: requireString(value, 'severity'),
+    status: requireString(value, 'status'),
+    description: requireString(value, 'description'),
+    evidence: isRecord(value.evidence) ? value.evidence : null,
+    createdAt: typeof value.created_at === 'string' ? value.created_at : null,
+  };
+}
+
+export function getFindingTypeLabel(findingType: string): string {
+  const labels: Record<string, string> = {
+    exact_duplicate: 'Exact duplicate',
+    entity_overlap: 'Entity overlap',
+    target_leakage: 'Target leakage',
+    temporal_leakage: 'Temporal leakage',
+    train_test_contamination: 'Train/test contamination',
+  };
+  return labels[findingType] ?? `Unknown finding type (${findingType})`;
+}
+
+export function summarizeFindings(
+  findings: PersistedFinding[]
+): FindingCategorySummary[] {
+  const counts = new Map<string, number>();
+  for (const finding of findings) {
+    counts.set(finding.findingType, (counts.get(finding.findingType) ?? 0) + 1);
+  }
+
+  return Array.from(counts, ([findingType, findingsCount]) => ({
+    findingType,
+    label: getFindingTypeLabel(findingType),
+    findingsCount,
+  }));
+}
+
 // ==========================================
 // DATASET OPERATIONS
 // ==========================================
 
 export async function getDatasets(): Promise<Dataset[]> {
-  await delay(250);
-  return [...datasetsStore];
+  const res = await fetch(`${getApiBaseUrl()}/datasets`);
+  if (!res.ok) {
+    throw new Error(`Failed to fetch datasets: ${res.status}`);
+  }
+  const data = await res.json();
+  if (!Array.isArray(data)) {
+    throw new Error('Expected an array of datasets from the API');
+  }
+  return data.map(toCamelCase);
 }
 
 export async function getDatasetById(id: string): Promise<Dataset | null> {
-  await delay(200);
-  const found = datasetsStore.find((d) => d.id === id);
-  return found ? { ...found } : null;
+  const res = await fetch(`${getApiBaseUrl()}/datasets/${encodeURIComponent(id)}`);
+  if (res.status === 404) {
+    return null;
+  }
+  if (!res.ok) {
+    throw new Error(`Failed to fetch dataset: ${res.status}`);
+  }
+  const data = await res.json();
+  return toCamelCase(data);
+}
+
+export function getSupportedUploadDetails(
+  fileName: string
+): { type: 'tabular' | 'computer-vision'; format: 'CSV' | 'XLSX' | 'ZIP' } | null {
+  const extension = fileName.includes('.') ? fileName.split('.').pop()?.toLowerCase() : undefined;
+  if (extension === 'csv') return { type: 'tabular', format: 'CSV' };
+  if (extension === 'xlsx') return { type: 'tabular', format: 'XLSX' };
+  if (extension === 'zip') return { type: 'computer-vision', format: 'ZIP' };
+  return null;
 }
 
 export async function uploadDataset(payload: {
   name: string;
   type: 'tabular' | 'computer-vision';
-  format: 'CSV' | 'XLSX' | 'ZIP' | 'YOLO' | 'COCO';
+  format: 'CSV' | 'XLSX' | 'ZIP';
   description: string;
-  sampleCount?: number;
+  file: File;
 }): Promise<Dataset> {
-  await delay(600);
-  const newDataset: Dataset = {
-    id: `ds-${Date.now().toString(36)}`,
-    name: payload.name,
-    type: payload.type,
-    format: payload.format,
-    sampleCount: payload.sampleCount || (payload.type === 'tabular' ? 12500 : 2400),
-    featureCount: payload.type === 'tabular' ? 18 : 4,
-    classCount: payload.type === 'tabular' ? 2 : 5,
-    status: 'Processing',
-    issuesCount: 0,
-    uploadedAt: new Date().toISOString().replace('T', ' ').substring(0, 19) + ' UTC',
-    lastAnalysis: 'Not analyzed yet',
-    description: payload.description,
-    columns: payload.type === 'tabular' ? [
-      { name: 'id', type: 'integer', missingCount: 0, uniqueCount: 12500 },
-      { name: 'feature_a', type: 'numeric', missingCount: 12, uniqueCount: 840 },
-      { name: 'feature_b', type: 'categorical', missingCount: 0, uniqueCount: 4 },
-      { name: 'label', type: 'categorical', missingCount: 0, uniqueCount: 2 }
-    ] : undefined,
-    cvStats: payload.type === 'computer-vision' ? {
-      imageCount: 2400,
-      classes: ['class_0', 'class_1', 'class_2'],
-      annotationsCount: 3120,
-      nearDuplicatePairsCount: 0,
-      resolutionDistribution: [
-        { label: '1024x1024', count: 1800 },
-        { label: '512x512', count: 600 }
-      ]
-    } : undefined
-  };
+  const formData = new FormData();
+  formData.append('name', payload.name);
+  formData.append('type', payload.type);
+  formData.append('format', payload.format);
+  formData.append('description', payload.description);
+  formData.append('file', payload.file);
 
-  datasetsStore = [newDataset, ...datasetsStore];
-  activitiesStore = [
-    {
-      id: `act-${Date.now()}`,
-      type: 'dataset_analyzed',
-      title: 'Dataset Uploaded',
-      description: `Uploaded ${newDataset.name} (${newDataset.format}, ${newDataset.sampleCount} samples).`,
-      timestamp: 'Just now',
-      targetId: newDataset.id,
-      severity: 'Low'
-    },
-    ...activitiesStore
-  ];
-
-  return newDataset;
+  const res = await fetch(`${getApiBaseUrl()}/datasets`, {
+    method: 'POST',
+    body: formData,
+  });
+  if (!res.ok) {
+    throw new Error(`Failed to upload dataset: ${res.statusText}`);
+  }
+  const data = await res.json();
+  return toCamelCase(data);
 }
 
 export async function deleteDataset(id: string): Promise<boolean> {
-  await delay(300);
-  datasetsStore = datasetsStore.filter((d) => d.id !== id);
+  const res = await fetch(`${getApiBaseUrl()}/datasets/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) {
+    throw new Error(`Failed to delete dataset: ${res.statusText}`);
+  }
+  // Backend returns 204 No Content on success; treat any 2xx as success.
   return true;
 }
 
@@ -128,13 +195,12 @@ export async function deleteDataset(id: string): Promise<boolean> {
 // ANALYSIS OPERATIONS
 // ==========================================
 
-export async function runDatasetAnalysis(
-  datasetId: string,
-  onProgress?: (stageIndex: number, stageName: string) => void
-): Promise<AnalysisResult> {
+export function buildAnalysisStages(
+  typeCounts: Record<string, number>
+): AnalysisStage[] {
   const stageNames = [
     'Dataset Profiling',
-    'Duplicate Detection',
+    'Exact Duplicate Detection',
     'Leakage Detection',
     'Label Analysis',
     'OOD Analysis',
@@ -142,205 +208,283 @@ export async function runDatasetAnalysis(
     'Risk Assessment',
     'Report Generation'
   ];
-
-  const stages: AnalysisStage[] = stageNames.map((name, idx) => ({
-    id: idx + 1,
-    name,
-    status: 'pending',
-    findingsCount: 0,
-    durationMs: 0,
-    description: `Executing ${name.toLowerCase()} algorithms across partitions.`
-  }));
-
-  for (let i = 0; i < stages.length; i++) {
-    stages[i].status = 'running';
-    if (onProgress) onProgress(i, stages[i].name);
-    await delay(350);
-    stages[i].status = 'completed';
-    stages[i].durationMs = Math.floor(Math.random() * 400) + 200;
-    stages[i].findingsCount = i === 1 ? 142 : i === 2 ? 50 : i === 3 ? 12 : i === 4 ? 6 : 0;
-  }
-
-  // Update dataset status to Issues Found or Review
-  const ds = datasetsStore.find((d) => d.id === datasetId);
-  if (ds) {
-    ds.status = 'Issues Found';
-    ds.issuesCount = 214;
-    ds.lastAnalysis = new Date().toISOString().replace('T', ' ').substring(0, 19) + ' UTC';
-  }
-
-  const result: AnalysisResult = {
-    id: `ans-${Date.now().toString(36)}`,
-    datasetId,
-    timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19) + ' UTC',
-    stages,
-    summary: {
-      totalFindings: 214,
-      duplicateFindings: 142,
-      entityFindings: 38,
-      targetFindings: 12,
-      temporalFindings: 8,
-      preprocessingFindings: 14,
-      contaminationFindings: 24,
-      cvNearDuplicates: 34,
-      labelAnomalies: 7,
-      oodSamples: 6,
-      overallRiskScore: 84,
-      overallRiskLevel: 'HIGH'
-    }
-  };
-
-  activitiesStore = [
-    {
-      id: `act-${Date.now()}`,
-      type: 'leakage_detected',
-      title: 'Integrity Analysis Completed',
-      description: `Analysis on dataset ${datasetId} concluded with 214 detected integrity findings.`,
-      timestamp: 'Just now',
-      targetId: datasetId,
-      severity: 'High'
-    },
-    ...activitiesStore
+  const stageFindingTypes = [
+    [],
+    ['exact_duplicate'],
+    ['entity_overlap', 'target_leakage', 'temporal_leakage', 'train_test_contamination'],
+    [],
+    [],
+    [],
+    [],
+    []
   ];
 
-  return result;
+  // This request supplies no optional detector columns; only exact-duplicate
+  // detection runs on the backend.
+  const executedFindingTypes = new Set(['exact_duplicate']);
+
+  return stageNames.map((name, idx) => {
+    const findingsCount = stageFindingTypes[idx].reduce(
+      (count, findingType) => count + (typeCounts[findingType] || 0),
+      0
+    );
+    const wasExecuted = stageFindingTypes[idx].some((findingType) =>
+      executedFindingTypes.has(findingType)
+    );
+
+    return {
+      id: idx + 1,
+      name,
+      status: wasExecuted ? 'completed' : 'pending',
+      ...(wasExecuted ? { findingsCount } : {}),
+      description: wasExecuted
+        ? 'Exact-duplicate detection ran for this request.'
+        : 'Not run by this analysis request.'
+    };
+  });
 }
 
-export async function getCategoryOverviews(datasetId: string): Promise<LeakageCategoryOverview[]> {
-  await delay(200);
-  return mockCategoryOverviews[datasetId] || mockCategoryOverviews['ds-adult-income'];
-}
+export async function runDatasetAnalysis(
+  datasetId: string,
+  onProgress?: (stageIndex: number, stageName: string) => void
+): Promise<AnalysisResult> {
+  // Build URL
+  const url = `${getApiBaseUrl()}/datasets/${datasetId}/analyze/leakage`;
+  // For initial integration, send no optional parameters (safe: exact duplicate only)
 
-export async function getFindings(datasetId?: string): Promise<LeakageFinding[]> {
-  await delay(250);
-  if (datasetId) {
-    return findingsStore.filter((f) => f.datasetId === datasetId);
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+    });
+
+    if (!response.ok) {
+      // Let the frontend handle error messaging via try/catch in AnalysisPage
+      throw new Error(`Backend error: ${response.status}`);
+    }
+
+    const data = await response.json();
+
+    // Map backend response to AnalysisResult
+    // Group findings by type
+    const findings = data.findings || [];
+    const typeCounts: Record<string, number> = {};
+    for (const f of findings) {
+      const t = f.finding_type;
+      typeCounts[t] = (typeCounts[t] || 0) + 1;
+    }
+
+    const stages = buildAnalysisStages(typeCounts);
+
+    // Update dataset store (mimic mock behavior)
+    const dsIndex = datasetsStore.findIndex((d) => d.id === datasetId);
+    if (dsIndex !== -1) {
+      datasetsStore[dsIndex] = {
+        ...datasetsStore[dsIndex],
+        status: findings.length > 0 ? 'Issues Found' : 'Clean',
+        issuesCount: findings.length, // total findings
+        lastAnalysis: new Date().toISOString().replace('T', ' ').substring(0, 19) + ' UTC',
+      };
+    }
+
+    // Update activities store (mimic mock)
+    activitiesStore = [
+      {
+        id: `act-${Date.now()}`,
+        type: 'leakage_detected',
+        title: 'Integrity Analysis Completed',
+        description: `Analysis on dataset ${datasetId} concluded with ${findings.length} detected integrity findings.`,
+        timestamp: 'Just now',
+        targetId: datasetId,
+        severity: findings.length > 0 ? 'High' : 'Low',
+      },
+      ...activitiesStore,
+    ];
+
+    // Update UI for completed stages based on actual backend response
+    if (onProgress) {
+      for (let i = 0; i < stages.length; i++) {
+        const stage = stages[i];
+        if (stage.status === 'completed') {
+          onProgress(i, stage.name);
+        }
+      }
+    }
+
+    const result: AnalysisResult = {
+      id: `ans-${Date.now().toString(36)}`,
+      datasetId,
+      timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19) + ' UTC',
+      stages,
+      summary: {
+        totalFindings: findings.length,
+        duplicateFindings: typeCounts['exact_duplicate'] || 0,
+      },
+    };
+
+    return result;
+  } catch (err) {
+    // Re-throw to let AnalysisPage catch and show error
+    throw err;
   }
-  return [...findingsStore];
-}
-
-export async function getFindingById(findingId: string): Promise<LeakageFinding | null> {
-  await delay(150);
-  const f = findingsStore.find((item) => item.id === findingId);
-  return f ? { ...f } : null;
-}
-
-export async function updateFindingStatus(findingId: string, status: 'Detected' | 'Under Review' | 'Repaired' | 'Quarantined'): Promise<boolean> {
-  await delay(200);
-  const item = findingsStore.find((f) => f.id === findingId);
-  if (item) {
-    item.status = status;
-    return true;
-  }
-  return false;
 }
 
 // ==========================================
-// REPAIR & EVALUATION OPERATIONS
+// REMAINING FUNCTIONS (UNCHANGED)
 // ==========================================
 
-export async function getRepairItems(datasetId: string): Promise<RepairItem[]> {
-  await delay(200);
-  return [
-    {
-      id: 'rep-01',
-      findingId: 'DL-102',
-      type: 'duplicate',
-      title: 'Cross-Split Exact Duplicates',
-      description: '142 exact feature row matches between train and test evaluation splits.',
-      count: 142,
-      severity: 'High',
-      recommendedAction: 'remove',
-      selected: true
-    },
-    {
-      id: 'rep-02',
-      findingId: 'EL-044',
-      type: 'entity',
-      title: 'Household / Subject Identity Overlap',
-      description: '38 patient/household clusters appearing in both evaluation groups.',
-      count: 38,
-      severity: 'Critical',
-      recommendedAction: 'quarantine',
-      selected: true
-    },
-    {
-      id: 'rep-03',
-      findingId: 'TL-019',
-      type: 'target',
-      title: 'Target Proxies (Post-decision Capital Gains)',
-      description: '12 records where capital settlement directly reveals outcome.',
-      count: 12,
-      severity: 'High',
-      recommendedAction: 'sanitize',
-      selected: true
-    },
-    {
-      id: 'rep-04',
-      findingId: 'PL-008',
-      type: 'preprocessing',
-      title: 'Global Normalization Transformer Leakage',
-      description: 'Rebuild pipeline transformers strictly on training partition folds.',
-      count: 1,
-      severity: 'High',
-      recommendedAction: 'repartition',
-      selected: true
-    }
-  ];
+export async function getCategoryOverviews(
+  datasetId: string
+): Promise<FindingCategorySummary[]> {
+  return summarizeFindings(await getFindings(datasetId));
 }
 
-export async function executeRepair(
-  datasetId: string,
-  selectedActionIds: string[]
-): Promise<RepairResult> {
-  await delay(800);
-  const result: RepairResult = {
-    id: `rep-res-${Date.now()}`,
-    datasetId,
-    originalCount: 48842,
-    removedCount: 142,
-    quarantinedCount: 38,
-    retainedCount: 48662,
-    reviewedCount: 180,
-    completedAt: new Date().toISOString().replace('T', ' ').substring(0, 19) + ' UTC',
-    downloadFilename: `dataleakguard_cleansed_${datasetId}.csv`
-  };
-
-  activitiesStore = [
-    {
-      id: `act-${Date.now()}`,
-      type: 'repair_completed',
-      title: 'Corrected Dataset Created',
-      description: `Quarantined 38 identity leaks and removed 142 exact duplicates from ${datasetId}.`,
-      timestamp: 'Just now',
-      targetId: datasetId,
-      severity: 'Low'
-    },
-    ...activitiesStore
-  ];
-
-  return result;
-}
-
-export async function retrainModel(
-  datasetId: string,
-  modelId: string,
-  onStep?: (pct: number, message: string) => void
-): Promise<ImpactAnalysis> {
-  const steps = [
-    { pct: 20, msg: 'Loading sanitized training partition...' },
-    { pct: 45, msg: 'Rebuilding isolated feature scaler and one-hot encoders...' },
-    { pct: 70, msg: 'Retraining GBDT estimators under 5-fold stratified cross-validation...' },
-    { pct: 90, msg: 'Evaluating on leak-free test partition...' },
-    { pct: 100, msg: 'Computing performance delta & evaluation inflation metrics...' }
-  ];
-
-  for (const step of steps) {
-    if (onStep) onStep(step.pct, step.msg);
-    await delay(300);
+export async function getFindings(datasetId: string): Promise<PersistedFinding[]> {
+  const response = await fetch(
+    `${getApiBaseUrl()}/datasets/${encodeURIComponent(datasetId)}/findings`
+  );
+  if (!response.ok) {
+    throw new Error(`Failed to fetch findings: ${response.status}`);
   }
 
-  return mockImpactData[datasetId] || mockImpactData['ds-adult-income'];
+  const data: unknown = await response.json();
+  if (!Array.isArray(data)) {
+    throw new Error('Invalid findings response: expected an array');
+  }
+  return data.map(mapPersistedFinding);
+}
+
+export async function getFindingById(findingId: string): Promise<PersistedFinding | null> {
+  const response = await fetch(
+    `${getApiBaseUrl()}/findings/${encodeURIComponent(findingId)}`
+  );
+  if (response.status === 404) {
+    return null;
+  }
+  if (!response.ok) {
+    throw new Error(`Failed to fetch finding: ${response.status}`);
+  }
+
+  return mapPersistedFinding(await response.json());
+}
+
+// ==========================================
+// REPAIR & QUARANTINE OPERATIONS
+// ==========================================
+
+function requiredOperationString(
+  value: Record<string, unknown>,
+  keys: string[],
+  fieldLabel: string
+): string {
+  for (const key of keys) {
+    if (typeof value[key] === 'string') {
+      return value[key] as string;
+    }
+  }
+  throw new Error(`Invalid operation response: expected "${fieldLabel}" to be a string`);
+}
+
+function optionalOperationValue(
+  value: Record<string, unknown>,
+  keys: string[],
+  fieldLabel: string,
+  isValid: (candidate: unknown) => boolean
+): unknown {
+  for (const key of keys) {
+    if (key in value) {
+      const candidate = value[key];
+      if (!isValid(candidate)) {
+        throw new Error(`Invalid operation response: "${fieldLabel}" has an unexpected value`);
+      }
+      return candidate;
+    }
+  }
+  return undefined;
+}
+
+export function mapDatasetOperationRecord(value: unknown): DatasetOperationRecord {
+  if (!isRecord(value)) {
+    throw new Error('Invalid operation response: expected an object');
+  }
+
+  const operationType = requiredOperationString(value, ['operation_type'], 'operation_type');
+  const idKeys =
+    operationType === 'repair'
+      ? ['repair_id', 'id', 'quarantine_id']
+      : operationType === 'quarantine'
+        ? ['quarantine_id', 'id', 'repair_id']
+        : ['id', 'repair_id', 'quarantine_id'];
+  const record: DatasetOperationRecord = {
+    id: requiredOperationString(value, idKeys, 'id'),
+    datasetId: requiredOperationString(value, ['dataset_id'], 'dataset_id'),
+    operationType,
+    status: requiredOperationString(value, ['status'], 'status'),
+  };
+
+  const optionalFields: Array<[keyof DatasetOperationRecord, string[], string, (candidate: unknown) => boolean]> = [
+    ['findingId', ['finding_id'], 'finding_id', (candidate) => candidate === null || typeof candidate === 'string'],
+    ['inputFile', ['input_file'], 'input_file', (candidate) => candidate === null || typeof candidate === 'string'],
+    ['inputFileSha256', ['input_file_sha256'], 'input_file_sha256', (candidate) => candidate === null || typeof candidate === 'string'],
+    ['outputFilename', ['output_filename', 'output_file'], 'output_filename', (candidate) => candidate === null || typeof candidate === 'string'],
+    ['outputFileSha256', ['output_file_sha256'], 'output_file_sha256', (candidate) => candidate === null || typeof candidate === 'string'],
+    ['affectedRows', ['affected_rows'], 'affected_rows', (candidate) => candidate === null || (typeof candidate === 'number' && Number.isFinite(candidate))],
+    ['createdAt', ['created_at'], 'created_at', (candidate) => candidate === null || typeof candidate === 'string'],
+    ['completedAt', ['completed_at'], 'completed_at', (candidate) => candidate === null || typeof candidate === 'string'],
+  ];
+
+  for (const [field, keys, fieldLabel, isValid] of optionalFields) {
+    const mappedValue = optionalOperationValue(value, keys, fieldLabel, isValid);
+    if (mappedValue !== undefined) {
+      // The field list above validates each value against its corresponding interface property.
+      (record as unknown as Record<string, unknown>)[field] = mappedValue;
+    }
+  }
+
+  return record;
+}
+
+export async function getDatasetOperationHistory(
+  datasetId: string
+): Promise<DatasetOperationRecord[]> {
+  // This existing route returns RepairRecord history for the dataset, including
+  // both repair and quarantine operation types.
+  const response = await fetch(
+    `${getApiBaseUrl()}/datasets/${encodeURIComponent(datasetId)}/repairs`
+  );
+  if (!response.ok) {
+    throw new Error(`Failed to fetch operation history: ${response.status}`);
+  }
+
+  const data: unknown = await response.json();
+  if (!Array.isArray(data)) {
+    throw new Error('Invalid operation history response: expected an array');
+  }
+  return data.map(mapDatasetOperationRecord);
+}
+
+async function createFindingOperation(
+  findingId: string,
+  operationType: FindingOperationType
+): Promise<DatasetOperationRecord> {
+  const response = await fetch(
+    `${getApiBaseUrl()}/findings/${encodeURIComponent(findingId)}/${operationType}`,
+    { method: 'POST' }
+  );
+  if (!response.ok) {
+    throw new Error(`Failed to ${operationType} finding: ${response.status}`);
+  }
+  return mapDatasetOperationRecord(await response.json());
+}
+
+export function repairFinding(findingId: string): Promise<DatasetOperationRecord> {
+  return createFindingOperation(findingId, 'repair');
+}
+
+export function quarantineFinding(findingId: string): Promise<DatasetOperationRecord> {
+  return createFindingOperation(findingId, 'quarantine');
 }
 
 // ==========================================
@@ -430,11 +574,11 @@ export async function getInferenceRecords(): Promise<InferenceRecord[]> {
 export async function runInference(payload: {
   modelId: string;
   imageOrVectorName: string;
-  config: string;
+  config: string
 }): Promise<InferenceRecord> {
   await delay(500);
   const model = modelsStore.find((m) => m.id === payload.modelId) || modelsStore[0];
-  
+
   const isCV = payload.imageOrVectorName.includes('.jpg') || payload.imageOrVectorName.includes('.png');
   const isChest = payload.imageOrVectorName.includes('xray') || model.id.includes('resnet');
 
