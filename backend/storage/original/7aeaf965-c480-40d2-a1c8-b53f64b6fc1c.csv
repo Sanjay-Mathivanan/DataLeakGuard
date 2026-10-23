@@ -1,0 +1,105 @@
+Employee_ID,First_Name,Last_Name,Email,Department,Job_Title,Hire_Date,Salary,Performance_Score,Remote_Status
+EMP1000,Emily,Davis,emp1000@company.com,Marketing,Software Engineer,2018-02-15,134791.0,Exceeds,Hybrid
+EMP1001,Joseph,Miller,emp1001@company.com,Human Resources,Product Manager,2017-04-14,108141.0,Fully Meets,Onsite
+EMP1002,Jessica,Taylor,emp1002@company.com,Human Resources,Software Engineer,2015-08-21,73793.0,Pip,Onsite
+EMP1003,Dorothy,Davis,emp1003@company.com,Engineering,Product Manager,2018-05-16,106570.0,Pip,Onsite
+EMP1004,Michael,Williams,emp1004@company.com,Engineering,Marketing Specialist,2018-06-22,87892.0,Pip,Onsite
+EMP1005,Emily,Davis,emp1005@company.com,,HR Generalist,2018-06-24,51015.0,Fully Meets,Onsite
+EMP1006,John,Jones,emp1006@company.com,Sales,Financial Analyst,2017-07-17,111813.0,Exceeds,Onsite
+EMP1007,Dorothy,Brown,emp1007@company.com,Marketing,Software Engineer,2018-08-22,77712.0,Exceeds,Hybrid
+EMP1008,Dorothy,Garcia,emp1008@company.com,Sales,Account Executive,2016-04-19,58415.0,Fully Meets,Onsite
+EMP1009,James,Davis,emp1009@company.com,Human Resources,Software Engineer,2017-01-14,112292.0,Exceeds,Onsite
+EMP1010,John,Smith,emp1010@company.com,Engineering,Financial Analyst,2016-05-18,73833.0,Fully Meets,Remote
+EMP1011,Charles,Jones,emp1011@company.com,Sales,Product Manager,2018-05-10,54158.0,Exceeds,Hybrid
+EMP1012,Sandra,Garcia,emp1012@company.com,Sales,Software Engineer,2016-02-10,,Needs Improvement,Hybrid
+EMP1013,William,Wilson,emp1013@company.com,Marketing,Data Scientist,2016-08-25,70309.0,Needs Improvement,Hybrid
+EMP1014,Daniel,Hernandez,emp1014@company.com,Operations,Marketing Specialist,2015-08-22,56970.0,Pip,Onsite
+EMP1005,Sandra,Brown,emp1015@company.com,Marketing,HR Generalist,2019-01-25,122474.0,Needs Improvement,Onsite
+EMP1016,Robert,Brown,emp1016@company.com,Human Resources,Financial Analyst,2019-07-14,136704.0,Needs Improvement,Onsite
+EMP1017,William,Moore,emp1017@company.com,Engineering,HR Generalist,2019-07-12,96540.0,Needs Improvement,Remote
+EMP1018,William,Jackson,emp1018@company.com,Marketing,Data Scientist,2018-02-25,70384.0,Fully Meets,Onsite
+EMP1019,Sarah,White,emp1019@company.com,Sales,Software Engineer,2017-05-23,68017.0,Needs Improvement,Remote
+EMP1020,John,Smith,emp1020@company.com,Engineering,Software Engineer,2018-05-24,125880.0,Needs Improvement,Hybrid
+EMP1021,David,Martinez,emp1021@company.com,Engineering,Account Executive,2015-06-23,58702.0,Pip,Onsite
+EMP1022,Jessica,Harris,emp1022@company.com,Sales,Data Scientist,2018-05-21,50384.0,Needs Improvement,Remote
+EMP1023,Jessica,Smith,emp1023@company.com,Marketing,Financial Analyst,2016-02-25,50404.0,Needs Improvement,Remote
+EMP1024,John,Jones,emp1024@company.com,Sales,Account Executive,2019-07-13,90943.0,Exceeds,Onsite
+EMP1025,William,Wilson,emp1025@company.com,Operations,Marketing Specialist,2015-06-14,97926.0,NULL,Hybrid
+EMP1026,Joseph,Jackson,emp1026@company.com,Engineering,Account Executive,2016-02-14,79189.0,Pip,Hybrid
+EMP1027,Charles,Brown,emp1027@company.com,Finance,Operations Manager,2018-02-19,62763.0,Pip,Hybrid
+EMP1028,Lisa,Gonzalez,emp1028@company.com,Finance,Financial Analyst,2016-03-10,68384.0,Pip,Remote
+EMP1029,John,Smith,emp1029@company.com,Human Resources,Operations Manager,2019-05-13,110100.0,Pip,Remote
+EMP1030,John,Smith,emp1030@company.com,Sales,Data Scientist,2016-01-21,59860.0,Pip,Remote
+EMP1031,Nancy,Wilson,emp1031@company.com,Sales,Product Manager,2016-03-10,130642.0,Fully Meets,Remote
+EMP1032,Emily,White,emp1032@company.com,Human Resources,Operations Manager,2015-05-20,100612.0,Needs Improvement,Hybrid
+EMP1033,Jane,Lopez,emp1033@company.com,Human Resources,Marketing Specialist,2019-04-12,73574.0,Pip,Onsite
+EMP1034,James,Moore,,Human Resources,Account Executive,2015-01-17,73524.0,Needs Improvement,Remote
+EMP1035,Thomas,Jackson,emp1035@company.com,Engineering,Product Manager,2016-03-21,119172.0,Needs Improvement,Remote
+EMP1036,Jane,Anderson,emp1036@company.com,Operations,Account Executive,2019-05-21,60916.0,Fully Meets,Hybrid
+EMP1037,Nancy,Miller,emp1037@company.com,Sales,Operations Manager,2016-05-27,54809.0,Pip,Onsite
+EMP1038,Sandra,Miller,emp1038@company.com,Engineering,Account Executive,2017-07-26,82201.0,Exceeds,Onsite
+EMP1039,Joseph,Harris,emp1039@company.com,Human Resources,Data Scientist,2016-08-19,103330.0,Fully Meets,Hybrid
+EMP1022,Jessica,Gonzalez,emp1040@company.com,Sales,Product Manager,2016-06-11,63456.0,Exceeds,Hybrid
+EMP1041,Emily,Wilson,emp1041@company.com,Engineering,Data Scientist,2017-01-16,106397.0,Needs Improvement,Onsite
+EMP1042,William,Williams,emp1042@company.com,Operations,Operations Manager,2018-02-27,88765.0,Needs Improvement,Remote
+EMP1043,Michael,Williams,emp1043@company.com,Engineering,Data Scientist,2019-03-13,84816.0,Fully Meets,Onsite
+EMP1044,Jessica,Harris,emp1044@company.com,Operations,Marketing Specialist,2015-05-13,95106.0,Fully Meets,Hybrid
+EMP1045,Charles,Jackson,emp1045@company.com,Human Resources,Operations Manager,2016-05-18,103932.0,Exceeds,None
+EMP1046,Thomas,Hernandez,emp1046@company.com,Operations,Operations Manager,2017-01-12,67100.0,Pip,Remote
+EMP1047,Sarah,Davis,emp1047@company.com,Sales,Operations Manager,2018-02-26,107091.0,Exceeds,Hybrid
+EMP1048,James,Wilson,emp1048@company.com,Human Resources,Financial Analyst,2019-04-26,71949.0,Fully Meets,Hybrid
+EMP1049,Jane,Anderson,emp1049@company.com,Sales,Account Executive,2019-07-12,120080.0,Exceeds,Hybrid
+EMP1050,Michael,Taylor,emp1050@company.com,Finance,Financial Analyst,2015-06-26,87744.0,Fully Meets,Onsite
+EMP1051,James,Hernandez,emp1051@company.com,Marketing,Financial Analyst,2015-06-25,95543.0,Exceeds,Onsite
+EMP1052,Sandra,Jones,emp1052@company.com,Operations,Marketing Specialist,,86187.0,Fully Meets,Remote
+EMP1053,Daniel,Williams,emp1053@company.com,Marketing,Product Manager,2017-03-26,57239.0,Fully Meets,Hybrid
+EMP1054,Betty,White,emp1054@company.com,Marketing,Account Executive,2018-04-18,64489.0,Fully Meets,Remote
+EMP1055,James,Moore,emp1055@company.com,Operations,Data Scientist,2017-04-18,108017.0,Pip,Remote
+EMP1056,Jane,Miller,emp1056@company.com,Human Resources,Software Engineer,2018-06-24,111877.0,Exceeds,Remote
+EMP1057,William,Brown,emp1057@company.com,Finance,Operations Manager,2019-05-12,93125.0,Exceeds,Remote
+EMP1058,Sandra,Hernandez,emp1058@company.com,Sales,Data Scientist,2018-01-13,99922.0,Exceeds,Hybrid
+EMP1059,Betty,Harris,emp1059@company.com,Engineering,Operations Manager,2019-07-25,82049.0,Fully Meets,Remote
+EMP1060,James,Martinez,emp1060@company.com,Sales,Marketing Specialist,2015-07-22,87131.0,Exceeds,Hybrid
+EMP1061,Thomas,Martinez,emp1061@company.com,Engineering,Operations Manager,2019-02-16,92944.0,Exceeds,Hybrid
+EMP1062,David,Harris,emp1062@company.com,Sales,Financial Analyst,2016-05-12,123963.0,Fully Meets,Onsite
+EMP1063,Jessica,Miller,emp1063@company.com,Operations,Account Executive,2019-03-20,74285.0,Needs Improvement,Hybrid
+EMP1064,Michael,Wilson,emp1064@company.com,Finance,Software Engineer,2016-07-21,87626.0,Fully Meets,Onsite
+EMP1065,Thomas,Lopez,emp1065@company.com,Engineering,HR Generalist,2015-02-21,92808.0,Exceeds,Hybrid
+EMP1066,Michael,Davis,emp1066@company.com,Human Resources,Operations Manager,2015-05-15,138464.0,Fully Meets,Hybrid
+EMP1067,David,Martinez,emp1067@company.com,Sales,Data Scientist,2019-08-19,103871.0,Needs Improvement,Hybrid
+EMP1068,Karen,Jones,emp1068@company.com,Sales,Financial Analyst,2015-02-11,69198.0,Fully Meets,Onsite
+EMP1069,Jane,Martinez,emp1069@company.com,Engineering,HR Generalist,2019-05-14,69758.0,Exceeds,Onsite
+EMP1070,Jessica,Martinez,emp1070@company.com,Human Resources,Software Engineer,2017-08-25,65254.0,Needs Improvement,Remote
+EMP1071,Karen,Martinez,emp1071@company.com,Human Resources,HR Generalist,2019-01-26,94238.0,Pip,Onsite
+EMP1072,Nancy,Lopez,emp1072@company.com,Operations,Financial Analyst,2015-05-13,51252.0,Exceeds,Onsite
+EMP1073,Jessica,Lopez,emp1073@company.com,Operations,Account Executive,2018-06-21,89764.0,Needs Improvement,Onsite
+EMP1074,Karen,Jones,emp1074@company.com,Operations,Account Executive,2017-02-16,127709.0,Needs Improvement,Onsite
+EMP1075,Robert,Williams,emp1075@company.com,Operations,Product Manager,2017-05-22,87441.0,Pip,Remote
+EMP1076,Emily,Williams,emp1076@company.com,Operations,Account Executive,2016-04-17,103682.0,Fully Meets,Onsite
+EMP1077,Nancy,White,emp1077@company.com,Operations,Product Manager,2019-07-18,109494.0,Fully Meets,Hybrid
+EMP1078,Robert,Lopez,emp1078@company.com,Finance,HR Generalist,2015-03-22,131317.0,Exceeds,Hybrid
+EMP1079,William,Miller,emp1079@company.com,Human Resources,Marketing Specialist,2018-06-26,115215.0,Pip,Onsite
+EMP1080,Michael,Anderson,emp1080@company.com,Operations,Data Scientist,2015-08-10,128587.0,Fully Meets,Onsite
+EMP1081,Dorothy,Smith,emp1081@company.com,Human Resources,Data Scientist,2019-06-21,56949.0,Pip,Hybrid
+EMP1082,John,Gonzalez,emp1082@company.com,Human Resources,HR Generalist,2019-08-22,105393.0,Fully Meets,Hybrid
+EMP1083,Sarah,Martinez,emp1083@company.com,Marketing,Operations Manager,2019-07-25,123553.0,Needs Improvement,Remote
+EMP1084,Michael,Anderson,emp1084@company.com,Finance,Operations Manager,2019-03-14,56941.0,Fully Meets,Hybrid
+EMP1085,Charles,Jones,emp1085@company.com,Operations,Account Executive,2018-03-27,75934.0,Pip,Hybrid
+EMP1086,Charles,Harris,emp1086@company.com,Sales,Data Scientist,2015-01-23,73386.0,Needs Improvement,Onsite
+EMP1087,Robert,Lopez,emp1087@company.com,Engineering,Data Scientist,2015-05-12,111886.0,Needs Improvement,Hybrid
+EMP1088,Lisa,Anderson,emp1088@company.com,Sales,Product Manager,2015-03-21,125745.0,Needs Improvement,Remote
+EMP1089,Betty,Gonzalez,emp1089@company.com,Finance,Marketing Specialist,2016-08-25,133251.0,Pip,Hybrid
+EMP1090,Emily,Martin,emp1090@company.com,Engineering,Financial Analyst,2018-08-17,103413.0,Exceeds,Onsite
+EMP1091,Nancy,Martin,emp1091@company.com,Finance,Operations Manager,2016-04-13,106800.0,Exceeds,Onsite
+EMP1092,Emily,Williams,emp1092@company.com,Human Resources,Data Scientist,2016-08-27,92318.0,Exceeds,Hybrid
+EMP1093,Nancy,Hernandez,emp1093@company.com,Engineering,Product Manager,2018-04-14,120173.0,Pip,Onsite
+EMP1094,Michael,Anderson,emp1094@company.com,Human Resources,Software Engineer,2015-04-26,120390.0,Needs Improvement,Remote
+EMP1095,William,Martin,emp1095@company.com,Sales,Product Manager,2015-01-22,102329.0,Exceeds,Remote
+EMP1096,Sandra,Davis,emp1096@company.com,Sales,Operations Manager,2018-08-22,93088.0,Pip,Hybrid
+EMP1097,Robert,Harris,emp1097@company.com,Engineering,Operations Manager,2017-05-15,89811.0,Exceeds,Hybrid
+EMP1098,David,Smith,emp1098@company.com,Engineering,Product Manager,2016-03-14,105479.0,Fully Meets,Hybrid
+EMP1099,Lisa,White,emp1099@company.com,Operations,Financial Analyst,2015-02-19,135392.0,Exceeds,Onsite
+EMP1008,Dorothy,Garcia,emp1008@company.com,Sales,Account Executive,2016-04-19,58415.0,Fully Meets,Onsite
+EMP1019,Sarah,White,emp1019@company.com,Sales,Software Engineer,2017-05-23,68017.0,Needs Improvement,Remote
+EMP1044,Jessica,Harris,emp1044@company.com,Operations,Marketing Specialist,2015-05-13,95106.0,Fully Meets,Hybrid
+EMP1072,Nancy,Lopez,emp1072@company.com,Operations,Financial Analyst,2015-05-13,51252.0,Exceeds,Onsite

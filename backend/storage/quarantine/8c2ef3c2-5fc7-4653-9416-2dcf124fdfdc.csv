@@ -1,0 +1,3 @@
+Employee_ID,First_Name,Last_Name,Email,Department,Job_Title,Hire_Date,Salary,Performance_Score,Remote_Status
+EMP1019,Sarah,White,emp1019@company.com,Sales,Software Engineer,2017-05-23,68017.0,Needs Improvement,Remote
+EMP1019,Sarah,White,emp1019@company.com,Sales,Software Engineer,2017-05-23,68017.0,Needs Improvement,Remote

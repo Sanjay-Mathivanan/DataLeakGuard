@@ -106,7 +106,7 @@ export interface FindingCategorySummary {
 export interface AnalysisStage {
   id: number;
   name: string;
-  status: 'pending' | 'running' | 'completed' | 'failed';
+  status: 'not_run' | 'needs_configuration' | 'running' | 'completed' | 'failed' | 'skipped';
   findingsCount?: number;
   description: string;
 }
@@ -116,6 +116,7 @@ export interface AnalysisResult {
   datasetId: string;
   timestamp: string;
   stages: AnalysisStage[];
+  findings: PersistedFinding[];
   summary: {
     totalFindings: number;
     duplicateFindings: number;
@@ -123,6 +124,20 @@ export interface AnalysisResult {
 }
 
 export type FindingOperationType = 'repair' | 'quarantine';
+
+export interface SkippedRepairFinding {
+  findingId: string;
+  reason: string;
+}
+
+export interface CombinedRepairMetadata {
+  selectedFindingIds: string[];
+  appliedFindingIds: string[];
+  skippedFindings: SkippedRepairFinding[];
+  originalRowCount: number;
+  finalRowCount: number;
+  duplicateRowsRemoved: number;
+}
 
 /** Fields returned by the persisted repair/quarantine operation APIs. */
 export interface DatasetOperationRecord {
@@ -136,6 +151,7 @@ export interface DatasetOperationRecord {
   outputFilename?: string | null;
   outputFileSha256?: string | null;
   affectedRows?: number | null;
+  operationMetadata?: CombinedRepairMetadata | null;
   createdAt?: string | null;
   completedAt?: string | null;
 }

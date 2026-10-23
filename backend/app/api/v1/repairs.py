@@ -1,9 +1,37 @@
+import hmac
+import logging
+import re
+
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from app.db.session import get_db
-from app.services.repair_service import repair_exact_duplicates
+from app.services.repair_service import (
+    generate_combined_exact_duplicate_repair,
+    repair_exact_duplicates,
+)
+from app.utils.file_storage import (
+    PROCESSED_DIR,
+    QUARANTINE_DIR,
+    compute_file_sha256,
+)
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
+_SAFE_OUTPUT_FILENAME = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9._-]*\.(?:csv|xlsx)",
+    re.IGNORECASE,
+)
+_OUTPUT_MEDIA_TYPES = {
+    ".csv": "text/csv",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+}
+
+
+class CombinedRepairRequest(BaseModel):
+    selected_finding_ids: list[str] = Field(min_length=1)
 
 
 @router.post("/findings/{finding_id}/repair", status_code=status.HTTP_201_CREATED)
@@ -68,6 +96,23 @@ def repair_dataset(dataset_id: str, db: Session = Depends(get_db)):
     return repair_results
 
 
+@router.post(
+    "/datasets/{dataset_id}/repairs/combined",
+    status_code=status.HTTP_201_CREATED,
+)
+def repair_dataset_combined(
+    dataset_id: str,
+    request: CombinedRepairRequest,
+    db: Session = Depends(get_db),
+):
+    """Generate one cleaned copy from user-selected exact-duplicate findings."""
+    return generate_combined_exact_duplicate_repair(
+        dataset_id=dataset_id,
+        selected_finding_ids=request.selected_finding_ids,
+        db=db,
+    )
+
+
 @router.get("/repairs/{repair_id}")
 def get_repair(repair_id: str, db: Session = Depends(get_db)):
     """
@@ -87,6 +132,7 @@ def get_repair(repair_id: str, db: Session = Depends(get_db)):
     ).first()
 
     # Convert repair record to the expected format (matching test expectations)
+    operation_metadata = repair_record.operation_metadata
     return {
         "id": str(repair_record.id),
         "dataset_id": repair_record.dataset_id,
@@ -98,11 +144,20 @@ def get_repair(repair_id: str, db: Session = Depends(get_db)):
         "output_file": repair_record.output_filename,
         "output_filename": repair_record.output_filename,
         "output_file_sha256": repair_record.output_file_sha256,
-        "original_row_count": getattr(repair_record, 'original_row_count', 0),
-        "processed_row_count": getattr(repair_record, 'processed_row_count', 0),
+        "original_row_count": (
+            operation_metadata.get("original_row_count")
+            if isinstance(operation_metadata, dict)
+            else getattr(repair_record, 'original_row_count', 0)
+        ),
+        "processed_row_count": (
+            operation_metadata.get("final_row_count")
+            if isinstance(operation_metadata, dict)
+            else getattr(repair_record, 'processed_row_count', 0)
+        ),
         "affected_rows": getattr(repair_record, 'affected_rows', 0),
         "affected_columns": getattr(repair_record, 'affected_columns', []),
         "quarantine_info": getattr(repair_record, 'quarantine_info', None),
+        "operation_metadata": operation_metadata,
         "created_at": repair_record.created_at.isoformat() if repair_record.created_at else None,
         "completed_at": repair_record.completed_at.isoformat() if repair_record.completed_at else None
     }
@@ -130,6 +185,7 @@ def get_dataset_repairs(dataset_id: str, db: Session = Depends(get_db)):
     # Convert to expected format (matching test expectations)
     repair_results = []
     for record in repair_records:
+        operation_metadata = record.operation_metadata
         repair_results.append({
             "id": str(record.id),
             "dataset_id": record.dataset_id,
@@ -141,13 +197,135 @@ def get_dataset_repairs(dataset_id: str, db: Session = Depends(get_db)):
             "output_file": record.output_filename,
             "output_filename": record.output_filename,
             "output_file_sha256": record.output_file_sha256,
-            "original_row_count": getattr(record, 'original_row_count', 0),
-            "processed_row_count": getattr(record, 'processed_row_count', 0),
+            "original_row_count": (
+                operation_metadata.get("original_row_count")
+                if isinstance(operation_metadata, dict)
+                else getattr(record, 'original_row_count', 0)
+            ),
+            "processed_row_count": (
+                operation_metadata.get("final_row_count")
+                if isinstance(operation_metadata, dict)
+                else getattr(record, 'processed_row_count', 0)
+            ),
             "affected_rows": getattr(record, 'affected_rows', 0),
             "affected_columns": getattr(record, 'affected_columns', []),
             "quarantine_info": getattr(record, 'quarantine_info', None),
+            "operation_metadata": operation_metadata,
             "created_at": record.created_at.isoformat() if record.created_at else None,
             "completed_at": record.completed_at.isoformat() if record.completed_at else None
         })
 
     return repair_results
+
+
+@router.get("/operations/{operation_id}/download")
+def download_operation_output(
+    operation_id: str,
+    db: Session = Depends(get_db),
+):
+    """Download a completed repair or quarantine output by operation ID."""
+    from app.db import models
+
+    operation = db.query(models.RepairRecord).filter(
+        models.RepairRecord.id == operation_id
+    ).first()
+    if operation is None:
+        raise HTTPException(status_code=404, detail="Operation not found")
+
+    if not isinstance(operation.status, str) or operation.status.lower() != "completed":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Operation output is not available until the operation is completed",
+        )
+
+    output_directories = {
+        "repair": PROCESSED_DIR,
+        "combined_repair": PROCESSED_DIR,
+        "quarantine": QUARANTINE_DIR,
+    }
+    output_directory = output_directories.get(operation.operation_type)
+    if output_directory is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Operation type does not support output downloads",
+        )
+
+    filename = operation.output_filename
+    if (
+        not isinstance(filename, str)
+        or not _SAFE_OUTPUT_FILENAME.fullmatch(filename)
+        or ".." in filename
+        or "/" in filename
+        or "\\" in filename
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Operation has an invalid output filename",
+        )
+
+    try:
+        storage_root = output_directory.resolve(strict=True)
+        output_path = (storage_root / filename).resolve(strict=True)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Operation output file not found")
+    except (OSError, RuntimeError):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Operation has an invalid output filename",
+        )
+
+    try:
+        output_path.relative_to(storage_root)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Operation has an invalid output filename",
+        )
+
+    if not output_path.is_file():
+        raise HTTPException(status_code=404, detail="Operation output file not found")
+
+    expected_sha256 = operation.output_file_sha256
+    if expected_sha256 is not None:
+        if (
+            not isinstance(expected_sha256, str)
+            or not re.fullmatch(r"[0-9a-fA-F]{64}", expected_sha256)
+        ):
+            logger.error(
+                "Invalid stored output hash (operation_id=%s)",
+                operation_id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Operation output failed SHA-256 integrity verification",
+            )
+        try:
+            actual_sha256 = compute_file_sha256(output_path)
+        except OSError:
+            logger.error(
+                "Unable to verify operation output (operation_id=%s)",
+                operation_id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Unable to verify operation output integrity",
+            )
+        if not hmac.compare_digest(actual_sha256, expected_sha256.lower()):
+            logger.error(
+                "Operation output SHA-256 mismatch (operation_id=%s)",
+                operation_id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Operation output failed SHA-256 integrity verification",
+            )
+
+    media_type = _OUTPUT_MEDIA_TYPES.get(
+        output_path.suffix.lower(),
+        "application/octet-stream",
+    )
+    return FileResponse(
+        path=output_path,
+        media_type=media_type,
+        filename=filename,
+    )

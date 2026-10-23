@@ -20,6 +20,7 @@ import {
   AnalysisResult,
   AnalysisStage,
   DatasetOperationRecord,
+  CombinedRepairMetadata,
   FindingOperationType,
   Model,
   InferenceRecord,
@@ -195,140 +196,196 @@ export async function deleteDataset(id: string): Promise<boolean> {
 // ANALYSIS OPERATIONS
 // ==========================================
 
+export interface LeakageAnalysisOptions {
+  entityColumn?: string;
+  splitColumn?: string;
+  targetColumn?: string;
+  timeColumn?: string;
+}
+
+type DetectorStageStatus = AnalysisStage['status'];
+
 export function buildAnalysisStages(
-  typeCounts: Record<string, number>
+  typeCounts: Record<string, number>,
+  options: LeakageAnalysisOptions = {},
+  execution: 'not_started' | 'running' | 'completed' | 'failed' = 'not_started'
 ): AnalysisStage[] {
-  const stageNames = [
-    'Dataset Profiling',
-    'Exact Duplicate Detection',
-    'Leakage Detection',
-    'Label Analysis',
-    'OOD Analysis',
-    'Distribution Analysis',
-    'Risk Assessment',
-    'Report Generation'
-  ];
-  const stageFindingTypes = [
-    [],
-    ['exact_duplicate'],
-    ['entity_overlap', 'target_leakage', 'temporal_leakage', 'train_test_contamination'],
-    [],
-    [],
-    [],
-    [],
-    []
+  const hasEntity = Boolean(options.entityColumn);
+  const hasSplit = Boolean(options.splitColumn);
+  const hasTime = Boolean(options.timeColumn);
+  const detectorStages: Array<{
+    id: number;
+    name: string;
+    findingType?: string;
+    requested: boolean;
+    needsConfiguration?: boolean;
+    skipped?: boolean;
+    requirement: string;
+  }> = [
+    {
+      id: 1,
+      name: 'Dataset Profiling',
+      requested: false,
+      skipped: true,
+      requirement: 'Profiling is not part of the leakage-analysis request.'
+    },
+    {
+      id: 2,
+      name: 'Exact Duplicate Detection',
+      findingType: 'exact_duplicate',
+      requested: true,
+      requirement: 'Runs for every leakage-analysis request.'
+    },
+    {
+      id: 3,
+      name: 'Entity Overlap',
+      findingType: 'entity_overlap',
+      requested: hasEntity && hasSplit,
+      needsConfiguration: hasEntity && !hasSplit,
+      requirement: 'Select both an entity/identifier column and a split column.'
+    },
+    {
+      id: 4,
+      name: 'Target Leakage',
+      findingType: 'target_leakage',
+      requested: Boolean(options.targetColumn),
+      requirement: 'Select a target column to run this detector.'
+    },
+    {
+      id: 5,
+      name: 'Temporal Leakage',
+      findingType: 'temporal_leakage',
+      requested: hasTime && hasSplit,
+      needsConfiguration: hasTime && !hasSplit,
+      requirement: 'Select both a timestamp/time column and a split column.'
+    },
+    {
+      id: 6,
+      name: 'Train/Test Contamination',
+      findingType: 'train_test_contamination',
+      requested: hasSplit,
+      requirement: 'Select a split column to run this detector.'
+    },
+    {
+      id: 7,
+      name: 'Distribution Analysis',
+      requested: false,
+      skipped: true,
+      requirement: 'No distribution-analysis detector is called by this endpoint.'
+    },
+    {
+      id: 8,
+      name: 'Report Generation',
+      requested: false,
+      skipped: true,
+      requirement: 'This endpoint does not generate a report.'
+    }
   ];
 
-  // This request supplies no optional detector columns; only exact-duplicate
-  // detection runs on the backend.
-  const executedFindingTypes = new Set(['exact_duplicate']);
+  return detectorStages.map((stage) => {
+    let status: DetectorStageStatus;
+    if (stage.skipped) {
+      status = 'skipped';
+    } else if (stage.needsConfiguration) {
+      status = 'needs_configuration';
+    } else if (!stage.requested) {
+      status = 'not_run';
+    } else if (execution === 'running') {
+      status = 'running';
+    } else if (execution === 'failed') {
+      status = 'failed';
+    } else if (execution === 'completed') {
+      status = 'completed';
+    } else {
+      status = 'not_run';
+    }
 
-  return stageNames.map((name, idx) => {
-    const findingsCount = stageFindingTypes[idx].reduce(
-      (count, findingType) => count + (typeCounts[findingType] || 0),
-      0
-    );
-    const wasExecuted = stageFindingTypes[idx].some((findingType) =>
-      executedFindingTypes.has(findingType)
-    );
+    const findingsCount =
+      status === 'completed' && stage.findingType
+        ? typeCounts[stage.findingType] ?? 0
+        : undefined;
 
     return {
-      id: idx + 1,
-      name,
-      status: wasExecuted ? 'completed' : 'pending',
-      ...(wasExecuted ? { findingsCount } : {}),
-      description: wasExecuted
-        ? 'Exact-duplicate detection ran for this request.'
-        : 'Not run by this analysis request.'
+      id: stage.id,
+      name: stage.name,
+      status,
+      ...(findingsCount !== undefined ? { findingsCount } : {}),
+      description:
+        status === 'completed'
+          ? `${stage.requirement} The backend request completed successfully.`
+          : stage.requirement
     };
   });
 }
 
 export async function runDatasetAnalysis(
   datasetId: string,
+  optionsOrProgress: LeakageAnalysisOptions | ((stageIndex: number, stageName: string) => void) = {},
   onProgress?: (stageIndex: number, stageName: string) => void
 ): Promise<AnalysisResult> {
-  // Build URL
-  const url = `${getApiBaseUrl()}/datasets/${datasetId}/analyze/leakage`;
-  // For initial integration, send no optional parameters (safe: exact duplicate only)
-
-  try {
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-    });
-
-    if (!response.ok) {
-      // Let the frontend handle error messaging via try/catch in AnalysisPage
-      throw new Error(`Backend error: ${response.status}`);
-    }
-
-    const data = await response.json();
-
-    // Map backend response to AnalysisResult
-    // Group findings by type
-    const findings = data.findings || [];
-    const typeCounts: Record<string, number> = {};
-    for (const f of findings) {
-      const t = f.finding_type;
-      typeCounts[t] = (typeCounts[t] || 0) + 1;
-    }
-
-    const stages = buildAnalysisStages(typeCounts);
-
-    // Update dataset store (mimic mock behavior)
-    const dsIndex = datasetsStore.findIndex((d) => d.id === datasetId);
-    if (dsIndex !== -1) {
-      datasetsStore[dsIndex] = {
-        ...datasetsStore[dsIndex],
-        status: findings.length > 0 ? 'Issues Found' : 'Clean',
-        issuesCount: findings.length, // total findings
-        lastAnalysis: new Date().toISOString().replace('T', ' ').substring(0, 19) + ' UTC',
-      };
-    }
-
-    // Update activities store (mimic mock)
-    activitiesStore = [
-      {
-        id: `act-${Date.now()}`,
-        type: 'leakage_detected',
-        title: 'Integrity Analysis Completed',
-        description: `Analysis on dataset ${datasetId} concluded with ${findings.length} detected integrity findings.`,
-        timestamp: 'Just now',
-        targetId: datasetId,
-        severity: findings.length > 0 ? 'High' : 'Low',
-      },
-      ...activitiesStore,
-    ];
-
-    // Update UI for completed stages based on actual backend response
-    if (onProgress) {
-      for (let i = 0; i < stages.length; i++) {
-        const stage = stages[i];
-        if (stage.status === 'completed') {
-          onProgress(i, stage.name);
-        }
-      }
-    }
-
-    const result: AnalysisResult = {
-      id: `ans-${Date.now().toString(36)}`,
-      datasetId,
-      timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19) + ' UTC',
-      stages,
-      summary: {
-        totalFindings: findings.length,
-        duplicateFindings: typeCounts['exact_duplicate'] || 0,
-      },
-    };
-
-    return result;
-  } catch (err) {
-    // Re-throw to let AnalysisPage catch and show error
-    throw err;
+  // Retain compatibility with the previous callback-as-second-argument form.
+  const options = typeof optionsOrProgress === 'function' ? {} : optionsOrProgress;
+  const reportProgress = typeof optionsOrProgress === 'function' ? optionsOrProgress : onProgress;
+  const url = new URL(
+    `${getApiBaseUrl()}/datasets/${encodeURIComponent(datasetId)}/analyze/leakage`,
+    typeof window === 'undefined' ? 'http://localhost' : window.location.origin
+  );
+  // The route rejects an entity or time parameter without a split parameter.
+  // Omit incomplete optional pairs while still allowing independent detectors
+  // (exact duplicates, target leakage, and split-only contamination) to run.
+  if (options.splitColumn) url.searchParams.set('split_column', options.splitColumn);
+  if (options.targetColumn) url.searchParams.set('target_column', options.targetColumn);
+  if (options.entityColumn && options.splitColumn) {
+    url.searchParams.set('entity_column', options.entityColumn);
   }
+  if (options.timeColumn && options.splitColumn) {
+    url.searchParams.set('time_column', options.timeColumn);
+  }
+  const requestUrl = url.origin === 'http://localhost'
+    ? `${url.pathname}${url.search}`
+    : url.toString();
+
+  const response = await fetch(requestUrl, { method: 'POST' });
+  if (!response.ok) {
+    let detail = '';
+    try {
+      const errorBody: unknown = await response.json();
+      if (isRecord(errorBody) && typeof errorBody.detail === 'string') {
+        detail = `: ${errorBody.detail}`;
+      }
+    } catch {
+      // Keep the HTTP status as the useful fallback when the body is not JSON.
+    }
+    throw new Error(`Leakage analysis failed (${response.status})${detail}`);
+  }
+
+  const data: unknown = await response.json();
+  if (!isRecord(data) || !Array.isArray(data.findings)) {
+    throw new Error('Invalid leakage analysis response: expected a findings array');
+  }
+
+  const findings = data.findings.map(mapPersistedFinding);
+  const typeCounts: Record<string, number> = {};
+  for (const finding of findings) {
+    typeCounts[finding.findingType] = (typeCounts[finding.findingType] ?? 0) + 1;
+  }
+
+  const stages = buildAnalysisStages(typeCounts, options, 'completed');
+  for (const [index, stage] of stages.entries()) {
+    if (stage.status === 'completed') reportProgress?.(index, stage.name);
+  }
+
+  return {
+    id: `ans-${Date.now().toString(36)}`,
+    datasetId,
+    timestamp: new Date().toISOString(),
+    stages,
+    findings,
+    summary: {
+      totalFindings: findings.length,
+      duplicateFindings: typeCounts.exact_duplicate ?? 0,
+    },
+  };
 }
 
 // ==========================================
@@ -405,6 +462,49 @@ function optionalOperationValue(
   return undefined;
 }
 
+function mapCombinedRepairMetadata(value: unknown): CombinedRepairMetadata | null {
+  if (value === null) return null;
+  if (!isRecord(value)) {
+    throw new Error('Invalid operation response: operation_metadata must be an object or null');
+  }
+
+  const stringArray = (candidate: unknown, field: string): string[] => {
+    if (!Array.isArray(candidate) || !candidate.every((item) => typeof item === 'string')) {
+      throw new Error(`Invalid operation response: operation_metadata.${field} must be a string array`);
+    }
+    return candidate;
+  };
+  const count = (candidate: unknown, field: string): number => {
+    if (typeof candidate !== 'number' || !Number.isInteger(candidate) || candidate < 0) {
+      throw new Error(`Invalid operation response: operation_metadata.${field} must be a non-negative integer`);
+    }
+    return candidate;
+  };
+  if (!Array.isArray(value.skipped_findings)) {
+    throw new Error('Invalid operation response: operation_metadata.skipped_findings must be an array');
+  }
+
+  const skippedFindings = value.skipped_findings.map((item) => {
+    if (
+      !isRecord(item) ||
+      typeof item.finding_id !== 'string' ||
+      typeof item.reason !== 'string'
+    ) {
+      throw new Error('Invalid operation response: skipped finding metadata is malformed');
+    }
+    return { findingId: item.finding_id, reason: item.reason };
+  });
+
+  return {
+    selectedFindingIds: stringArray(value.selected_finding_ids, 'selected_finding_ids'),
+    appliedFindingIds: stringArray(value.applied_finding_ids, 'applied_finding_ids'),
+    skippedFindings,
+    originalRowCount: count(value.original_row_count, 'original_row_count'),
+    finalRowCount: count(value.final_row_count, 'final_row_count'),
+    duplicateRowsRemoved: count(value.duplicate_rows_removed, 'duplicate_rows_removed'),
+  };
+}
+
 export function mapDatasetOperationRecord(value: unknown): DatasetOperationRecord {
   if (!isRecord(value)) {
     throw new Error('Invalid operation response: expected an object');
@@ -443,6 +543,10 @@ export function mapDatasetOperationRecord(value: unknown): DatasetOperationRecor
     }
   }
 
+  if ('operation_metadata' in value) {
+    record.operationMetadata = mapCombinedRepairMetadata(value.operation_metadata);
+  }
+
   return record;
 }
 
@@ -463,6 +567,121 @@ export async function getDatasetOperationHistory(
     throw new Error('Invalid operation history response: expected an array');
   }
   return data.map(mapDatasetOperationRecord);
+}
+
+export async function generateCombinedCleanedDataset(
+  datasetId: string,
+  selectedFindingIds: string[]
+): Promise<DatasetOperationRecord> {
+  if (selectedFindingIds.length === 0) {
+    throw new Error('Select at least one eligible exact-duplicate finding.');
+  }
+
+  const response = await fetch(
+    `${getApiBaseUrl()}/datasets/${encodeURIComponent(datasetId)}/repairs/combined`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ selected_finding_ids: selectedFindingIds }),
+    }
+  );
+  if (!response.ok) {
+    let detail = '';
+    try {
+      const errorBody: unknown = await response.json();
+      if (isRecord(errorBody) && typeof errorBody.detail === 'string') {
+        detail = `: ${errorBody.detail}`;
+      } else if (isRecord(errorBody) && isRecord(errorBody.detail)) {
+        const errorDetail = errorBody.detail;
+        const message = typeof errorDetail.message === 'string' ? errorDetail.message : '';
+        const skipped = Array.isArray(errorDetail.skipped_findings)
+          ? errorDetail.skipped_findings
+              .filter(
+                (item): item is Record<string, unknown> =>
+                  isRecord(item) &&
+                  typeof item.finding_id === 'string' &&
+                  typeof item.reason === 'string'
+              )
+              .map((item) => `${item.finding_id}: ${item.reason}`)
+          : [];
+        detail = [
+          message,
+          skipped.length > 0 ? `Skipped findings — ${skipped.join('; ')}` : '',
+        ]
+          .filter(Boolean)
+          .map((part) => `: ${part}`)
+          .join('');
+      }
+    } catch {
+      // Retain the status code when the error body is not JSON.
+    }
+    throw new Error(`Failed to generate combined cleaned dataset (${response.status})${detail}`);
+  }
+  return mapDatasetOperationRecord(await response.json());
+}
+
+export interface OperationOutputDownload {
+  blob: Blob;
+  filename: string;
+}
+
+function getSafeDownloadFilename(response: Response): string {
+  const disposition = response.headers.get('content-disposition');
+  if (!disposition) {
+    throw new Error('Download response did not include a filename');
+  }
+
+  const encodedFilename = /filename\*\s*=\s*(?:UTF-8'')?([^;]+)/i.exec(disposition);
+  const plainFilename = /filename\s*=\s*(?:"([^"]+)"|([^;]+))/i.exec(disposition);
+  const rawFilename = encodedFilename?.[1] ?? plainFilename?.[1] ?? plainFilename?.[2];
+  if (!rawFilename) {
+    throw new Error('Download response did not include a valid filename');
+  }
+
+  let filename = rawFilename.trim().replace(/^"|"$/g, '');
+  if (encodedFilename) {
+    try {
+      filename = decodeURIComponent(filename);
+    } catch {
+      throw new Error('Download response included an invalid filename');
+    }
+  }
+
+  if (
+    filename.includes('..') ||
+    filename.includes('/') ||
+    filename.includes('\\') ||
+    !/^[A-Za-z0-9][A-Za-z0-9._-]*\.(?:csv|xlsx)$/i.test(filename)
+  ) {
+    throw new Error('Download response included an unsafe filename');
+  }
+  return filename;
+}
+
+export async function downloadOperationOutput(
+  operationId: string
+): Promise<OperationOutputDownload> {
+  const response = await fetch(
+    `${getApiBaseUrl()}/operations/${encodeURIComponent(operationId)}/download`
+  );
+  if (!response.ok) {
+    let detail = '';
+    try {
+      const errorBody: unknown = await response.json();
+      if (isRecord(errorBody) && typeof errorBody.detail === 'string') {
+        detail = `: ${errorBody.detail}`;
+      }
+    } catch {
+      // Keep the HTTP status as the useful fallback for non-JSON error bodies.
+    }
+    throw new Error(`Failed to download operation output (${response.status})${detail}`);
+  }
+
+  const filename = getSafeDownloadFilename(response);
+  return {
+    blob: await response.blob(),
+    filename,
+  };
 }
 
 async function createFindingOperation(

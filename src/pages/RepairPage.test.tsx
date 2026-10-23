@@ -3,7 +3,14 @@ import { test } from 'node:test';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { DatasetOperationRecord, PersistedFinding } from '../types';
-import { getSupportedFindingOperations, RepairPageView } from './RepairPage';
+import {
+  canDownloadOperation,
+  downloadOperationToBrowser,
+  getEligibleCombinedRepairFindings,
+  getSupportedFindingOperations,
+  RepairPageView,
+  validateCombinedRepairSelection,
+} from './RepairPage';
 
 const finding: PersistedFinding = {
   id: 'finding-17',
@@ -38,7 +45,16 @@ function renderView(
     loadError: null,
     operationError: null,
     activeOperationKey: null,
+    downloadingOperationId: null,
+    downloadError: null,
+    eligibleCombinedFindings: [finding],
+    selectedCombinedFindingIds: [],
+    combinedRepairLoading: false,
+    combinedRepairError: null,
     onRunOperation: () => {},
+    onDownloadOperation: () => {},
+    onToggleCombinedFinding: () => {},
+    onGenerateCombinedRepair: () => {},
     onRetry: () => {},
     ...overrides,
   };
@@ -80,6 +96,50 @@ test('operation eligibility is restricted to supported types with matching ident
     getSupportedFindingOperations({ ...finding, evidence: null }, 'dataset-4'),
     []
   );
+});
+
+test('combined repair eligibility requires matching dataset, open status, supported evidence, and no prior repair', () => {
+  const resolved = { ...finding, id: 'resolved', status: 'resolved' };
+  const priorRepair: DatasetOperationRecord = {
+    ...operation,
+    findingId: finding.id,
+  };
+  const eligible = getEligibleCombinedRepairFindings(
+    [finding, resolved],
+    'dataset-4',
+    [priorRepair]
+  );
+  assert.deepEqual(eligible, []);
+  assert.deepEqual(
+    getEligibleCombinedRepairFindings([finding, resolved], 'dataset-4', []),
+    [finding]
+  );
+  assert.deepEqual(
+    getEligibleCombinedRepairFindings([finding], 'other-dataset', []),
+    []
+  );
+  const alreadyCombined: DatasetOperationRecord = {
+    ...priorRepair,
+    findingId: null,
+    operationType: 'combined_repair',
+    operationMetadata: {
+      selectedFindingIds: [finding.id],
+      appliedFindingIds: [finding.id],
+      skippedFindings: [],
+      originalRowCount: 4,
+      finalRowCount: 3,
+      duplicateRowsRemoved: 1,
+    },
+  };
+  assert.deepEqual(
+    getEligibleCombinedRepairFindings([finding], 'dataset-4', [alreadyCombined]),
+    []
+  );
+  assert.equal(
+    validateCombinedRepairSelection([]),
+    'Select at least one eligible exact-duplicate finding.'
+  );
+  assert.equal(validateCombinedRepairSelection([finding.id]), null);
 });
 
 test('loading, fetch-error, and empty states are explicit and do not imply detector coverage', () => {
@@ -149,8 +209,132 @@ test('operation history distinguishes quarantine files from processed repair cop
   assert.match(html, /affected-rows\.csv/);
   assert.match(html, /quarantine-hash/);
   assert.match(html, /uploaded original dataset is not modified/);
-  assert.match(html, /Downloads are not available yet/);
+  assert.match(html, /Download output/);
   assert.doesNotMatch(html, /<a\\b/);
+});
+
+test('combined selection is explicit and empty selection cannot be submitted', () => {
+  const empty = renderView();
+  assert.match(empty, /Select at least one eligible exact-duplicate finding/);
+  assert.match(empty, /Generate Combined Cleaned Dataset/);
+  assert.match(empty, /disabled=""/);
+  assert.match(empty, /type="checkbox"/);
+
+  const selected = renderView({ selectedCombinedFindingIds: [finding.id] });
+  assert.match(selected, /aria-label="Include finding finding-17" checked=""/);
+  assert.doesNotMatch(selected, /Select at least one eligible exact-duplicate finding/);
+  assert.doesNotMatch(selected, /disabled=""/);
+  assert.match(
+    renderView({ combinedRepairError: 'The finding is no longer eligible.' }),
+    /The finding is no longer eligible/
+  );
+});
+
+test('combined operation history displays truthful summary, provenance, and final download action', () => {
+  const combined: DatasetOperationRecord = {
+    id: 'combined-operation-31',
+    datasetId: 'dataset-4',
+    operationType: 'combined_repair',
+    status: 'completed',
+    outputFilename: 'cleaned.csv',
+    outputFileSha256: 'verified-output-hash',
+    affectedRows: 2,
+    operationMetadata: {
+      selectedFindingIds: ['duplicate-a', 'duplicate-b'],
+      appliedFindingIds: ['duplicate-a', 'duplicate-b'],
+      skippedFindings: [{ findingId: 'duplicate-c', reason: 'Finding status is resolved.' }],
+      originalRowCount: 5,
+      finalRowCount: 3,
+      duplicateRowsRemoved: 2,
+    },
+  };
+  const html = renderView({ history: [combined] });
+  assert.match(html, /Operation ID: combined-operation-31/);
+  assert.match(html, /Original data rows: <strong>5/);
+  assert.match(html, /Final data rows: <strong>3/);
+  assert.match(html, /Duplicate rows removed: <strong>2/);
+  assert.match(html, /Applied findings: duplicate-a, duplicate-b/);
+  assert.match(html, /duplicate-c: Finding status is resolved/);
+  assert.match(html, /verified-output-hash/);
+  assert.match(html, /Download Final Dataset/);
+  assert.equal(canDownloadOperation(combined), true);
+});
+
+test('only completed repair and quarantine records with operation IDs expose download controls', () => {
+  assert.equal(canDownloadOperation(operation), true);
+  assert.equal(
+    canDownloadOperation({ ...operation, operationType: 'quarantine' }),
+    true
+  );
+  assert.equal(canDownloadOperation({ ...operation, status: 'processing' }), false);
+  assert.equal(canDownloadOperation({ ...operation, status: 'failed' }), false);
+  assert.equal(canDownloadOperation({ ...operation, id: '   ' }), false);
+  assert.equal(canDownloadOperation({ ...operation, operationType: 'future_operation' }), false);
+
+  const incompleteHtml = renderView({
+    history: [{ ...operation, status: 'processing' }],
+  });
+  assert.doesNotMatch(incompleteHtml, /Download output/);
+
+  const missingIdHtml = renderView({
+    history: [{ ...operation, id: '' }],
+  });
+  assert.doesNotMatch(missingIdHtml, /Download output/);
+});
+
+test('operation download passes the returned binary and filename to the browser saver', async () => {
+  const blob = new Blob(['downloaded output'], { type: 'text/csv' });
+  let savedBlob: Blob | null = null;
+  let savedFilename = '';
+
+  await downloadOperationToBrowser(
+    operation.id,
+    async (requestedId) => {
+      assert.equal(requestedId, operation.id);
+      return { blob, filename: 'processed-copy.csv' };
+    },
+    (downloadedBlob, filename) => {
+      savedBlob = downloadedBlob;
+      savedFilename = filename;
+    }
+  );
+
+  assert.equal(savedBlob, blob);
+  assert.equal(savedFilename, 'processed-copy.csv');
+});
+
+test('combined final download uses the persisted combined operation ID', async () => {
+  let requestedId = '';
+  let savedName = '';
+  await downloadOperationToBrowser(
+    'combined-operation-31',
+    async (id) => {
+      requestedId = id;
+      return { blob: new Blob(['cleaned']), filename: 'cleaned.csv' };
+    },
+    (_blob, filename) => {
+      savedName = filename;
+    }
+  );
+  assert.equal(requestedId, 'combined-operation-31');
+  assert.equal(savedName, 'cleaned.csv');
+});
+
+test('operation download errors propagate without invoking the browser saver', async () => {
+  let saveCalled = false;
+  await assert.rejects(
+    downloadOperationToBrowser(
+      operation.id,
+      async () => {
+        throw new Error('Failed to download operation output (404)');
+      },
+      () => {
+        saveCalled = true;
+      }
+    ),
+    /Failed to download operation output \(404\)/
+  );
+  assert.equal(saveCalled, false);
 });
 
 test('unknown operation metadata and absent row counts render without fabricated zeroes', () => {
@@ -166,4 +350,17 @@ test('unknown operation metadata and absent row counts render without fabricated
   assert.doesNotMatch(html, /0 rows/);
   assert.doesNotMatch(html, /Rows written to separate quarantine output/);
   assert.match(html, /Affected-row count was not available/);
+});
+
+test('operation download errors render next to the affected history record', () => {
+  const html = renderView({
+    history: [operation],
+    downloadError: {
+      operationId: operation.id,
+      message: 'The generated output failed its SHA-256 integrity check and was not downloaded.',
+    },
+  });
+
+  assert.match(html, /role="alert"/);
+  assert.match(html, /failed its SHA-256 integrity check/);
 });

@@ -247,3 +247,278 @@ def repair_exact_duplicates(
         "created_at": repair_record.created_at.isoformat() if repair_record.created_at else None,
         "completed_at": repair_record.completed_at.isoformat() if repair_record.completed_at else None
     }
+
+
+def generate_combined_exact_duplicate_repair(
+    dataset_id: str,
+    selected_finding_ids: List[str],
+    db: Session,
+) -> Dict[str, Any]:
+    """Create one cleaned copy from explicitly selected, current duplicate findings."""
+    if not isinstance(selected_finding_ids, list):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="selected_finding_ids must be a non-empty list",
+        )
+    if any(not isinstance(value, str) or not value.strip() for value in selected_finding_ids):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="selected_finding_ids must contain non-empty finding IDs",
+        )
+    if not selected_finding_ids:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Select at least one finding for combined repair",
+        )
+
+    requested_ids = sorted(set(selected_finding_ids))
+    dataset = db.query(models.Dataset).filter(
+        models.Dataset.id == dataset_id
+    ).first()
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    if not dataset.storage_filename:
+        raise HTTPException(status_code=400, detail="Dataset has no storage filename")
+    if dataset.format.upper() not in {"CSV", "XLSX"}:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file format: {dataset.format}",
+        )
+
+    original_path = get_and_validate_original_path(dataset)
+    try:
+        input_sha256 = compute_file_sha256(original_path)
+    except OSError:
+        raise HTTPException(status_code=404, detail="Original file not found")
+    if dataset.file_sha256 and input_sha256 != dataset.file_sha256:
+        raise HTTPException(
+            status_code=400,
+            detail="Original file SHA-256 mismatch - file may be corrupted",
+        )
+
+    # Return an equivalent completed operation before writing another output.
+    completed_operations = db.query(models.RepairRecord).filter(
+        models.RepairRecord.dataset_id == dataset_id,
+        models.RepairRecord.operation_type == "combined_repair",
+        models.RepairRecord.status == "completed",
+    ).all()
+    for existing in completed_operations:
+        metadata = existing.operation_metadata
+        if (
+            existing.input_file_sha256 == input_sha256
+            and isinstance(metadata, dict)
+            and metadata.get("selected_finding_ids") == requested_ids
+        ):
+            return _combined_repair_response(existing, dataset.storage_filename)
+
+    try:
+        if dataset.format.upper() == "CSV":
+            original_frame = pd.read_csv(original_path, dtype=str)
+        else:
+            original_frame = pd.read_excel(original_path, dtype=str)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to read original file: {exc}",
+        )
+
+    findings = db.query(leakage_models.LeakageFinding).filter(
+        leakage_models.LeakageFinding.id.in_(requested_ids)
+    ).all()
+    findings_by_id = {finding.id: finding for finding in findings}
+    if len(findings_by_id) != len(requested_ids):
+        raise HTTPException(status_code=404, detail="One or more findings were not found")
+    if any(finding.dataset_id != dataset_id for finding in findings):
+        raise HTTPException(
+            status_code=400,
+            detail="Every selected finding must belong to the specified dataset",
+        )
+    if any(finding.finding_type != "exact_duplicate" for finding in findings):
+        raise HTTPException(
+            status_code=400,
+            detail="Combined repair supports exact_duplicate findings only",
+        )
+
+    previously_applied_ids = set()
+    individual_repairs = db.query(models.RepairRecord.finding_id).filter(
+        models.RepairRecord.dataset_id == dataset_id,
+        models.RepairRecord.finding_id.in_(requested_ids),
+        models.RepairRecord.operation_type == "repair",
+        models.RepairRecord.status == "completed",
+    ).all()
+    previously_applied_ids.update(
+        finding_id for (finding_id,) in individual_repairs if finding_id
+    )
+    for operation in completed_operations:
+        metadata = operation.operation_metadata
+        if isinstance(metadata, dict):
+            applied_ids = metadata.get("applied_finding_ids")
+            if isinstance(applied_ids, list):
+                previously_applied_ids.update(
+                    value for value in applied_ids if isinstance(value, str)
+                )
+
+    frame_hashes = [
+        hash_row(original_frame.iloc[index])
+        for index in range(len(original_frame))
+    ]
+    rows_by_hash: Dict[str, List[int]] = {}
+    for index, row_hash in enumerate(frame_hashes):
+        rows_by_hash.setdefault(row_hash, []).append(index)
+
+    applied_ids: List[str] = []
+    skipped_findings: List[Dict[str, str]] = []
+    rows_to_remove = set()
+    for finding_id in requested_ids:
+        finding = findings_by_id[finding_id]
+        if not isinstance(finding.status, str) or finding.status.strip().lower() != "open":
+            skipped_findings.append({
+                "finding_id": finding_id,
+                "reason": f"Finding status is '{finding.status}', not 'open'.",
+            })
+            continue
+        if finding_id in previously_applied_ids:
+            skipped_findings.append({
+                "finding_id": finding_id,
+                "reason": "Finding was already included in a completed repair.",
+            })
+            continue
+
+        evidence = finding.evidence
+        row_indices = evidence.get("row_indices") if isinstance(evidence, dict) else None
+        evidence_hash = evidence.get("hash") if isinstance(evidence, dict) else None
+        duplicate_count = evidence.get("duplicate_count") if isinstance(evidence, dict) else None
+        valid_indices = (
+            isinstance(row_indices, list)
+            and len(row_indices) >= 2
+            and all(type(index) is int and 0 <= index < len(original_frame) for index in row_indices)
+            and len(set(row_indices)) == len(row_indices)
+        )
+        if (
+            not valid_indices
+            or type(duplicate_count) is not int
+            or duplicate_count != len(row_indices)
+            or not isinstance(evidence_hash, str)
+        ):
+            skipped_findings.append({
+                "finding_id": finding_id,
+                "reason": "Duplicate evidence is missing, malformed, or no longer valid.",
+            })
+            continue
+
+        actual_group_indices = rows_by_hash.get(evidence_hash, [])
+        if (
+            len(actual_group_indices) < 2
+            or sorted(row_indices) != actual_group_indices
+            or any(frame_hashes[index] != evidence_hash for index in row_indices)
+        ):
+            skipped_findings.append({
+                "finding_id": finding_id,
+                "reason": "Duplicate evidence no longer matches the original dataset rows.",
+            })
+            continue
+
+        applied_ids.append(finding_id)
+        rows_to_remove.update(actual_group_indices[1:])
+
+    if not applied_ids or not rows_to_remove:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": "No selected findings remain eligible for combined repair",
+                "skipped_findings": skipped_findings,
+            },
+        )
+
+    original_row_count = len(original_frame)
+    cleaned_frame = original_frame.drop(index=sorted(rows_to_remove))
+    final_row_count = len(cleaned_frame)
+    duplicate_rows_removed = len(rows_to_remove)
+    metadata = {
+        "selected_finding_ids": requested_ids,
+        "applied_finding_ids": applied_ids,
+        "skipped_findings": skipped_findings,
+        "original_row_count": original_row_count,
+        "final_row_count": final_row_count,
+        "duplicate_rows_removed": duplicate_rows_removed,
+    }
+
+    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+    processed_path = None
+    processed_filename = None
+    output_created = False
+    try:
+        for _ in range(5):
+            processed_filename = generate_output_filename(dataset.storage_filename)
+            processed_path = PROCESSED_DIR / processed_filename
+            try:
+                if dataset.format.upper() == "CSV":
+                    output = processed_path.open("x", encoding="utf-8", newline="")
+                else:
+                    output = processed_path.open("xb")
+                output_created = True
+                break
+            except FileExistsError:
+                continue
+        else:
+            raise FileExistsError("Unable to allocate a unique processed filename")
+
+        with output:
+            cleaned_frame.to_csv(output, index=False) if dataset.format.upper() == "CSV" else cleaned_frame.to_excel(output, index=False)
+        output_sha256 = compute_file_sha256(processed_path)
+
+        record = models.RepairRecord(
+            dataset_id=dataset_id,
+            finding_id=None,
+            operation_type="combined_repair",
+            status="completed",
+            input_file_sha256=input_sha256,
+            output_file_sha256=output_sha256,
+            output_filename=processed_filename,
+            affected_rows=duplicate_rows_removed,
+            affected_columns=[],
+            quarantine_info=None,
+            operation_metadata=metadata,
+        )
+        db.add(record)
+        db.commit()
+        db.refresh(record)
+    except Exception as exc:
+        if processed_path is not None and processed_filename is not None:
+            cleanup_created_output_if_unreferenced(
+                db, processed_path, processed_filename, output_created
+            )
+        if isinstance(exc, HTTPException):
+            raise
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to generate or persist the combined cleaned dataset",
+        )
+
+    return _combined_repair_response(record, dataset.storage_filename)
+
+
+def _combined_repair_response(
+    record: models.RepairRecord,
+    input_filename: str,
+) -> Dict[str, Any]:
+    metadata = record.operation_metadata or {}
+    return {
+        "id": str(record.id),
+        "dataset_id": record.dataset_id,
+        "finding_id": None,
+        "operation_type": record.operation_type,
+        "status": record.status,
+        "input_file": input_filename,
+        "input_file_sha256": record.input_file_sha256,
+        "output_file": record.output_filename,
+        "output_filename": record.output_filename,
+        "output_file_sha256": record.output_file_sha256,
+        "original_row_count": metadata.get("original_row_count"),
+        "processed_row_count": metadata.get("final_row_count"),
+        "affected_rows": record.affected_rows,
+        "affected_columns": [],
+        "operation_metadata": metadata,
+        "created_at": record.created_at.isoformat() if record.created_at else None,
+        "completed_at": record.completed_at.isoformat() if record.completed_at else None,
+    }

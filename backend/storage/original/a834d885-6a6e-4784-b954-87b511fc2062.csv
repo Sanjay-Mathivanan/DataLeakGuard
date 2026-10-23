@@ -1,0 +1,9 @@
+id,entity,split,value
+1,P1,train,train
+2,,train,missing-entity
+3,P1,,missing-split
+4,P1,test,test
+5,P1,validation,validation
+6,P2,train,other
+7,   ,test,empty-entity
+8,P1,   ,empty-split

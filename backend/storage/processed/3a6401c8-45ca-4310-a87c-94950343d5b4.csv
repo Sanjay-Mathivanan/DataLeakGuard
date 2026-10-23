@@ -1,0 +1,7 @@
+EmployeeID,Department,Salary,Attrition
+E001,IT,50000,No
+E002,HR,40000,Yes
+E003,Sales,45000,No
+E004,Finance,60000,No
+E005,IT,52000,Yes
+E006,Sales,47000,No

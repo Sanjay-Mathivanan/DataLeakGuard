@@ -1,0 +1,3 @@
+Employee_ID,First_Name,Last_Name,Email,Department,Job_Title,Hire_Date,Salary,Performance_Score,Remote_Status
+EMP1072,Nancy,Lopez,emp1072@company.com,Operations,Financial Analyst,2015-05-13,51252.0,Exceeds,Onsite
+EMP1072,Nancy,Lopez,emp1072@company.com,Operations,Financial Analyst,2015-05-13,51252.0,Exceeds,Onsite

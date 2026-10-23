@@ -4,6 +4,8 @@ import { test } from 'node:test';
 import {
   buildAnalysisStages,
   deleteDataset,
+  downloadOperationOutput,
+  generateCombinedCleanedDataset,
   getCategoryOverviews,
   getDatasetById,
   getDatasetOperationHistory,
@@ -21,37 +23,44 @@ import {
 } from './api';
 import { PersistedFinding } from '../types';
 
-test('analysis stages are completed only for detectors invoked without optional columns', () => {
-  const stages = buildAnalysisStages({
-    exact_duplicate: 1,
-    target_leakage: 1,
-    temporal_leakage: 1,
-    entity_overlap: 1,
-    train_test_contamination: 1,
-  });
+test('analysis stages reflect only requested detectors and do not invent counts', () => {
+  const stages = buildAnalysisStages({ exact_duplicate: 1, entity_overlap: 4 }, {}, 'completed');
+  assert.equal(buildAnalysisStages({ exact_duplicate: 5 })[1].status, 'not_run');
 
   assert.deepEqual(
     stages.filter((stage) => stage.status === 'completed').map((stage) => stage.id),
     [2]
   );
   assert.equal(stages[1].findingsCount, 1);
-  assert.equal(stages[2].status, 'pending');
+  assert.equal(stages[2].status, 'not_run');
   assert.equal(stages[2].findingsCount, undefined);
-  assert.equal(stages[3].status, 'pending');
-  assert.equal(stages[2].description, 'Not run by this analysis request.');
-  assert.equal('durationMs' in stages[1], false);
+  assert.equal(stages[3].status, 'not_run');
+  assert.equal(stages[0].status, 'skipped');
 });
 
-test('unrun detectors have no fabricated finding count', () => {
-  const stages = buildAnalysisStages({
-    exact_duplicate: 2,
-    entity_overlap: 3,
-  });
+test('analysis stage execution covers optional detector requirements and configuration gaps', () => {
+  const fullyConfigured = buildAnalysisStages(
+    { exact_duplicate: 0, entity_overlap: 2, target_leakage: 1, temporal_leakage: 3, train_test_contamination: 0 },
+    { entityColumn: 'subject', splitColumn: 'partition', targetColumn: 'label', timeColumn: 'captured_at' },
+    'completed'
+  );
+  assert.deepEqual(
+    fullyConfigured.filter((stage) => stage.status === 'completed').map((stage) => stage.id),
+    [2, 3, 4, 5, 6]
+  );
+  assert.equal(fullyConfigured[2].findingsCount, 2);
+  assert.equal(fullyConfigured[5].findingsCount, 0);
 
-  assert.equal(stages[1].findingsCount, 2);
-  assert.equal(stages[3].status, 'pending');
-  assert.equal(stages[2].findingsCount, undefined);
-  assert.equal(stages[3].findingsCount, undefined);
+  const incomplete = buildAnalysisStages({}, { entityColumn: 'subject', timeColumn: 'captured_at' });
+  assert.equal(incomplete[2].status, 'needs_configuration');
+  assert.match(incomplete[2].description, /split column/);
+  assert.equal(incomplete[4].status, 'needs_configuration');
+  assert.equal(incomplete[5].status, 'not_run');
+
+  const failed = buildAnalysisStages({}, { targetColumn: 'label' }, 'failed');
+  assert.equal(failed[1].status, 'failed');
+  assert.equal(failed[3].status, 'failed');
+  assert.equal(failed[2].status, 'not_run');
 });
 
 test('upload metadata exposes only backend-supported formats case-insensitively', () => {
@@ -63,13 +72,26 @@ test('upload metadata exposes only backend-supported formats case-insensitively'
   assert.equal(getSupportedUploadDetails('csv'), null);
 });
 
-test('analysis request sends no optional detector columns and only reports exact duplicates as run', async () => {
+test('analysis request with no optional columns runs exact duplicates and maps persisted findings', async () => {
   await withMockFetch(async (input, init) => {
     assert.match(String(input), /\/datasets\/dataset-4\/analyze\/leakage$/);
     assert.equal(init?.method, 'POST');
     assert.equal(init?.body, undefined);
     return new Response(JSON.stringify({
-      findings: [{ finding_type: 'exact_duplicate' }],
+      dataset_id: 'dataset-4',
+      rows_examined: 3,
+      duplicate_group_count: 1,
+      duplicated_row_count: 2,
+      findings: [{
+        id: 'duplicate-1',
+        dataset_id: 'dataset-4',
+        finding_type: 'exact_duplicate',
+        severity: 'medium',
+        status: 'open',
+        description: 'Two identical rows.',
+        evidence: { row_indices: [0, 2] },
+        created_at: '2026-01-15T12:30:00Z',
+      }],
     }), { status: 200 });
   }, async () => {
     const result = await runDatasetAnalysis('dataset-4');
@@ -79,6 +101,66 @@ test('analysis request sends no optional detector columns and only reports exact
     );
     assert.equal(result.summary.duplicateFindings, 1);
     assert.deepEqual(result.summary, { totalFindings: 1, duplicateFindings: 1 });
+    assert.deepEqual(result.findings[0].evidence, { row_indices: [0, 2] });
+  });
+});
+
+test('analysis query maps valid entity, target, temporal, and split selections to backend names', async () => {
+  await withMockFetch(async (input, init) => {
+    const url = new URL(String(input), 'http://localhost');
+    assert.equal(init?.method, 'POST');
+    assert.equal(url.searchParams.get('entity_column'), 'subject id');
+    assert.equal(url.searchParams.get('split_column'), 'data split');
+    assert.equal(url.searchParams.get('target_column'), 'outcome');
+    assert.equal(url.searchParams.get('time_column'), 'event date');
+    return new Response(JSON.stringify({
+      findings: [
+        { ...backendFinding, finding_type: 'entity_overlap' },
+        { ...backendFinding, id: 'finding-target', finding_type: 'target_leakage' },
+        { ...backendFinding, id: 'finding-time', finding_type: 'temporal_leakage' },
+        { ...backendFinding, id: 'finding-contamination', finding_type: 'train_test_contamination' },
+      ],
+    }), { status: 200 });
+  }, async () => {
+    const result = await runDatasetAnalysis('dataset-4', {
+      entityColumn: 'subject id',
+      splitColumn: 'data split',
+      targetColumn: 'outcome',
+      timeColumn: 'event date',
+    });
+    assert.deepEqual(result.stages.filter((stage) => stage.status === 'completed').map((stage) => stage.id), [2, 3, 4, 5, 6]);
+    assert.equal(result.summary.totalFindings, 4);
+  });
+});
+
+test('incomplete entity/time selections are omitted instead of sending invalid parameter pairs', async () => {
+  await withMockFetch(async (input) => {
+    const url = new URL(String(input), 'http://localhost');
+    assert.equal(url.searchParams.get('entity_column'), null);
+    assert.equal(url.searchParams.get('time_column'), null);
+    assert.equal(url.searchParams.get('target_column'), 'label');
+    assert.equal(url.searchParams.get('split_column'), null);
+    return new Response(JSON.stringify({ findings: [] }), { status: 200 });
+  }, async () => {
+    const result = await runDatasetAnalysis('dataset-4', {
+      entityColumn: 'subject',
+      targetColumn: 'label',
+      timeColumn: 'captured_at',
+    });
+    assert.deepEqual(result.stages.filter((stage) => stage.status === 'completed').map((stage) => stage.id), [2, 4]);
+    assert.equal(result.stages[2].status, 'needs_configuration');
+    assert.equal(result.stages[4].status, 'needs_configuration');
+  });
+});
+
+test('backend validation errors are surfaced and never returned as completed analysis', async () => {
+  await withMockFetch(async () => new Response(JSON.stringify({
+    detail: "Target column 'missing_target' not found in dataset columns",
+  }), { status: 400 }), async () => {
+    await assert.rejects(
+      runDatasetAnalysis('dataset-4', { targetColumn: 'missing_target' }),
+      /Leakage analysis failed \(400\): Target column 'missing_target' not found/
+    );
   });
 });
 
@@ -289,6 +371,26 @@ const repairOperationResponse = {
   processed_row_count: 0,
 };
 
+const combinedOperationResponse = {
+  id: 'combined-operation-31',
+  dataset_id: 'dataset-4',
+  finding_id: null,
+  operation_type: 'combined_repair',
+  status: 'completed',
+  input_file_sha256: 'input-sha256',
+  output_filename: 'cleaned.csv',
+  output_file_sha256: 'output-sha256',
+  affected_rows: 2,
+  operation_metadata: {
+    selected_finding_ids: ['duplicate-a', 'duplicate-b'],
+    applied_finding_ids: ['duplicate-a', 'duplicate-b'],
+    skipped_findings: [],
+    original_row_count: 5,
+    final_row_count: 3,
+    duplicate_rows_removed: 2,
+  },
+};
+
 test('operation history maps returned fields and omits placeholder row totals', async () => {
   await withMockFetch(async (input) => {
     assert.match(String(input), /\/datasets\/dataset-4\/repairs$/);
@@ -358,6 +460,60 @@ test('repair and quarantine actions POST to their finding-specific backend route
   });
 });
 
+test('combined repair posts only selected findings and maps persisted provenance', async () => {
+  await withMockFetch(async (input, init) => {
+    assert.match(
+      String(input),
+      /\/datasets\/dataset-4\/repairs\/combined$/
+    );
+    assert.equal(init?.method, 'POST');
+    assert.equal(
+      new Headers(init?.headers).get('content-type'),
+      'application/json'
+    );
+    assert.deepEqual(JSON.parse(String(init?.body)), {
+      selected_finding_ids: ['duplicate-a', 'duplicate-b'],
+    });
+    return new Response(JSON.stringify(combinedOperationResponse), { status: 201 });
+  }, async () => {
+    const result = await generateCombinedCleanedDataset(
+      'dataset-4',
+      ['duplicate-a', 'duplicate-b']
+    );
+    assert.equal(result.id, 'combined-operation-31');
+    assert.equal(result.operationType, 'combined_repair');
+    assert.equal(result.operationMetadata?.originalRowCount, 5);
+    assert.equal(result.operationMetadata?.finalRowCount, 3);
+    assert.equal(result.operationMetadata?.duplicateRowsRemoved, 2);
+    assert.deepEqual(result.operationMetadata?.appliedFindingIds, [
+      'duplicate-a',
+      'duplicate-b',
+    ]);
+  });
+});
+
+test('combined repair validates empty selection and reports backend errors', async () => {
+  await assert.rejects(
+    generateCombinedCleanedDataset('dataset-4', []),
+    /Select at least one eligible exact-duplicate finding/
+  );
+
+  await withMockFetch(async () => new Response(JSON.stringify({
+    detail: {
+      message: 'No selected findings remain eligible for combined repair',
+      skipped_findings: [{
+        finding_id: 'stale-finding',
+        reason: 'Evidence no longer matches the original dataset rows.',
+      }],
+    },
+  }), { status: 409 }), async () => {
+    await assert.rejects(
+      generateCombinedCleanedDataset('dataset-4', ['stale-finding']),
+      /combined cleaned dataset \(409\).*No selected findings remain eligible.*stale-finding.*Evidence no longer matches/
+    );
+  });
+});
+
 test('operation API surfaces backend errors and rejects malformed histories', async () => {
   await withMockFetch(async () => new Response('failure', { status: 500 }), async () => {
     await assert.rejects(getDatasetOperationHistory('dataset-4'), /Failed to fetch operation history: 500/);
@@ -366,5 +522,50 @@ test('operation API surfaces backend errors and rejects malformed histories', as
 
   await withMockFetch(async () => new Response(JSON.stringify({ operations: [] }), { status: 200 }), async () => {
     await assert.rejects(getDatasetOperationHistory('dataset-4'), /expected an array/);
+  });
+});
+
+test('operation output download requests binary data and returns a safe server filename', async () => {
+  const payload = 'name,value\nsample,1\n';
+  await withMockFetch(async (input, init) => {
+    assert.match(
+      String(input),
+      /\/operations\/operation-21\/download$/
+    );
+    assert.equal(init?.method, undefined);
+    return new Response(new Blob([payload], { type: 'text/csv' }), {
+      status: 200,
+      headers: {
+        'Content-Disposition': 'attachment; filename="processed-copy.csv"',
+      },
+    });
+  }, async () => {
+    const result = await downloadOperationOutput('operation-21');
+    assert.equal(result.filename, 'processed-copy.csv');
+    assert.equal(await result.blob.text(), payload);
+    assert.equal(result.blob.type, 'text/csv');
+  });
+});
+
+test('operation output download surfaces backend errors and rejects unsafe filenames', async () => {
+  await withMockFetch(async () => new Response(JSON.stringify({
+    detail: 'Operation output failed SHA-256 integrity verification',
+  }), { status: 500 }), async () => {
+    await assert.rejects(
+      downloadOperationOutput('operation-21'),
+      /Failed to download operation output \(500\).*integrity verification/
+    );
+  });
+
+  await withMockFetch(async () => new Response(new Blob(['data']), {
+    status: 200,
+    headers: {
+      'Content-Disposition': 'attachment; filename="../outside.csv"',
+    },
+  }), async () => {
+    await assert.rejects(
+      downloadOperationOutput('operation-21'),
+      /unsafe filename/
+    );
   });
 });

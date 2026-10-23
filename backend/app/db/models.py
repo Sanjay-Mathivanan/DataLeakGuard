@@ -45,7 +45,7 @@ class RepairRecord(Base):
 
     dataset_id = Column(String, nullable=False, index=True)
     finding_id = Column(String, nullable=True, index=True)  # Nullable for dataset-level repairs
-    operation_type = Column(String, nullable=False)  # 'repair' or 'quarantine'
+    operation_type = Column(String, nullable=False)  # repair, quarantine, or combined_repair
     status = Column(String, nullable=False, default='pending')  # 'pending', 'processing', 'completed', 'failed'
     input_file_sha256 = Column(String, nullable=False)
     output_file_sha256 = Column(String, nullable=True)
@@ -53,6 +53,7 @@ class RepairRecord(Base):
     affected_rows = Column(Integer, nullable=False, default=0)
     affected_columns = Column(JSON, nullable=True)  # List of column names affected
     quarantine_info = Column(JSON, nullable=True)  # For quarantine operations
+    operation_metadata = Column(JSON, nullable=True)  # Provenance for compound operations
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     completed_at = Column(DateTime(timezone=True), nullable=True)
     error_info = Column(JSON, nullable=True)
