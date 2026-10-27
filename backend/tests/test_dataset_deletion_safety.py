@@ -3,7 +3,7 @@ import hashlib
 import pytest
 from fastapi import HTTPException
 
-from app.api.v1.datasets import delete_dataset
+from app.api.v1.datasets import _delete_dataset_owned
 from app.db import leakage_models, models, session as db_session
 from app.utils.file_storage import ORIGINAL_DIR, PROCESSED_DIR, QUARANTINE_DIR
 
@@ -71,7 +71,7 @@ def test_delete_is_blocked_when_findings_exist(test_db):
         db.commit()
 
         with pytest.raises(HTTPException) as exc_info:
-            delete_dataset(dataset.id, db)
+            _delete_dataset_owned(dataset.id, db, dataset.owner_user_id)
 
         assert exc_info.value.status_code == 409
         assert db.query(models.Dataset).filter_by(id=dataset.id).first() is not None
@@ -81,18 +81,16 @@ def test_delete_is_blocked_when_findings_exist(test_db):
         db.close()
 
 
-@pytest.mark.parametrize(
-    ("operation_type", "output_dir"),
-    [
-        ("repair", PROCESSED_DIR),
-        ("quarantine", QUARANTINE_DIR),
-    ],
-)
-def test_delete_is_blocked_when_operation_outputs_exist(
-    test_db, operation_type, output_dir
-):
+@pytest.mark.parametrize("operation_type", ["repair", "quarantine"])
+def test_delete_is_blocked_when_operation_outputs_exist(test_db, operation_type):
     db = db_session.TestingSessionLocal()
     try:
+        # Resolve these at test execution time. Collection-time Path parameters
+        # retain the repository storage directories before the autouse
+        # isolated_storage fixture can redirect module constants.
+        output_dir = (
+            PROCESSED_DIR if operation_type == "repair" else QUARANTINE_DIR
+        )
         dataset, original_path, original_content = _create_dataset(db)
         output_filename = f"{operation_type}-output.csv"
         output_path = output_dir / output_filename
@@ -113,7 +111,7 @@ def test_delete_is_blocked_when_operation_outputs_exist(
         db.commit()
 
         with pytest.raises(HTTPException) as exc_info:
-            delete_dataset(dataset.id, db)
+            _delete_dataset_owned(dataset.id, db, dataset.owner_user_id)
 
         assert exc_info.value.status_code == 409
         assert db.query(models.Dataset).filter_by(id=dataset.id).first() is not None
@@ -137,7 +135,7 @@ def test_delete_rolls_back_and_preserves_original_when_commit_fails(
 
         monkeypatch.setattr(db, "commit", fail_commit)
         with pytest.raises(RuntimeError, match="simulated commit failure"):
-            delete_dataset(dataset_id, db)
+            _delete_dataset_owned(dataset_id, db, dataset.owner_user_id)
 
         assert db.query(models.Dataset).filter_by(id=dataset_id).first() is not None
         assert original_path.read_bytes() == original_content
@@ -164,7 +162,7 @@ def test_delete_preserves_dataset_and_file_when_reference_check_fails(
 
         monkeypatch.setattr(db, "query", fail_operation_reference_check)
         with pytest.raises(RuntimeError, match="reference-check failure"):
-            delete_dataset(dataset_id, db)
+            _delete_dataset_owned(dataset_id, db, dataset.owner_user_id)
 
         verification_db = db_session.TestingSessionLocal()
         try:

@@ -26,6 +26,16 @@ export interface DatasetProfile {
   heightMax?: number | null;
   sampledImages?: number;
   error?: string;
+  targetColumn?: string | null;
+  targetClassCounts?: Record<string, number>;
+  splitColumn?: string | null;
+  splitRowCounts?: Record<string, number>;
+  analysisColumns?: {
+    entityColumn?: string | null;
+    splitColumn?: string | null;
+    targetColumn?: string | null;
+    timeColumn?: string | null;
+  };
 }
 
 export interface Dataset {
@@ -42,7 +52,20 @@ export interface Dataset {
   lastAnalysis?: string | null;
   description?: string | null;
   previewRows?: Record<string, string | number>[];
-  columns?: { name: string; type: string; missingCount: number; uniqueCount: number }[];
+  columns?: {
+    name: string;
+    type: string;
+    missingCount: number;
+    uniqueCount: number;
+    statistics?: {
+      kind: 'numeric' | 'categorical';
+      min?: number | null;
+      max?: number | null;
+      mean?: number | null;
+      median?: number | null;
+      topValues?: Array<{ value: string; count: number }>;
+    };
+  }[];
   cvStats?: CVStats | null;
   profile?: DatasetProfile | null;
 }
@@ -290,7 +313,7 @@ export interface AssuranceReport {
 
 export interface Activity {
   id: string;
-  type: 'dataset_analyzed' | 'model_verified' | 'leakage_detected' | 'provenance_verified' | 'report_generated' | 'repair_completed';
+  type: string;
   title: string;
   description: string;
   timestamp: string;

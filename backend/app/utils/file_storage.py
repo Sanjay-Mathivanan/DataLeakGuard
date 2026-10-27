@@ -11,11 +11,6 @@ ORIGINAL_DIR = STORAGE_BASE / "original"
 PROCESSED_DIR = STORAGE_BASE / "processed"
 QUARANTINE_DIR = STORAGE_BASE / "quarantine"
 
-# Ensure directories exist
-ORIGINAL_DIR.mkdir(parents=True, exist_ok=True)
-PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
-QUARANTINE_DIR.mkdir(parents=True, exist_ok=True)
-
 def _allowed_file(filename: str, allowed_extensions: set) -> bool:
     return "." in filename and \
            filename.rsplit(".", 1)[1].lower() in allowed_extensions
@@ -65,6 +60,7 @@ def save_upload_file(
     Raises ValueError on validation errors.
     """
     file_ext = validate_upload_file(original_filename, dataset_type)
+    ORIGINAL_DIR.mkdir(parents=True, exist_ok=True)
 
     # Size check
     max_size = (

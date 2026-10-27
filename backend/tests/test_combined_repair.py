@@ -234,6 +234,89 @@ def test_overlapping_duplicate_evidence_does_not_double_count_rows(combined_data
     assert result["processed_row_count"] == 4
 
 
+def test_combined_repair_matches_split_analysis_duplicate_evidence(
+    combined_dataset, monkeypatch
+):
+    client = combined_dataset["client"]
+    dataset_id = combined_dataset["dataset_id"]
+    source = combined_dataset["original"]
+    monkeypatch.setattr("app.utils.file_storage.ORIGINAL_DIR", source.parent)
+    monkeypatch.setattr(
+        "app.services.leakage_detection_service.ORIGINAL_DIR", source.parent
+    )
+    source_bytes = (
+        "id,value,split\n"
+        "1,alpha,train\n"
+        "2,alpha,test\n"
+        "3,beta,train\n"
+        "4,beta,test\n"
+    ).encode()
+    source.write_bytes(source_bytes)
+
+    db = app.db.session.TestingSessionLocal()
+    dataset = db.query(models.Dataset).filter_by(id=dataset_id).first()
+    dataset.file_sha256 = hashlib.sha256(source_bytes).hexdigest()
+    db.query(leakage_models.LeakageFinding).filter_by(
+        dataset_id=dataset_id
+    ).delete(synchronize_session=False)
+    db.commit()
+    db.close()
+
+    analysis = client.post(
+        f"/api/v1/datasets/{dataset_id}/analyze/leakage",
+        params={"split_column": "split"},
+    )
+    assert analysis.status_code == 200, analysis.text
+    exact_findings = [
+        finding
+        for finding in analysis.json()["findings"]
+        if finding["finding_type"] == "exact_duplicate"
+    ]
+    assert len(exact_findings) == 2
+    assert all(
+        finding["evidence"]["hash_excluded_columns"] == ["id", "split"]
+        for finding in exact_findings
+    )
+
+    # Repeating the same analysis configuration must reuse the persisted
+    # findings while retaining their hash configuration.
+    repeated_analysis = client.post(
+        f"/api/v1/datasets/{dataset_id}/analyze/leakage",
+        params={"split_column": "split"},
+    )
+    assert repeated_analysis.status_code == 200, repeated_analysis.text
+    repeated_exact_findings = [
+        finding
+        for finding in repeated_analysis.json()["findings"]
+        if finding["finding_type"] == "exact_duplicate"
+    ]
+    assert {finding["id"] for finding in repeated_exact_findings} == {
+        finding["id"] for finding in exact_findings
+    }
+
+    # Later analysis settings must not invalidate already-persisted evidence.
+    latest_analysis = client.post(
+        f"/api/v1/datasets/{dataset_id}/analyze/leakage"
+    )
+    assert latest_analysis.status_code == 200, latest_analysis.text
+
+    response = generate(
+        client,
+        dataset_id,
+        [finding["id"] for finding in exact_findings],
+    )
+    assert response.status_code == 201, response.text
+    result = response.json()
+    assert result["original_row_count"] == 4
+    assert result["processed_row_count"] == 2
+    assert result["affected_rows"] == 2
+    assert result["operation_metadata"]["applied_finding_ids"] == sorted(
+        finding["id"] for finding in exact_findings
+    )
+    assert result["operation_metadata"]["skipped_findings"] == []
+    assert source.read_bytes() == source_bytes
+
+
 def test_combined_repair_rejects_unknown_empty_cross_dataset_and_non_duplicate(
     combined_dataset,
 ):
@@ -254,6 +337,7 @@ def test_combined_repair_rejects_unknown_empty_cross_dataset_and_non_duplicate(
             file_sha256=hashlib.sha256(CSV_CONTENT).hexdigest(),
         )
     )
+    db.flush()
     db.add(
         leakage_models.LeakageFinding(
             id="cross-dataset-finding",

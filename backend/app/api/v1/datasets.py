@@ -1,6 +1,9 @@
+from datetime import datetime, timezone
+import uuid
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
 from sqlalchemy.orm import Session
+import pandas as pd
 from app.db import models, leakage_models, schemas
 from app.db.session import get_db
 from app.core import dataset_service
@@ -8,8 +11,39 @@ from app.core.config import settings
 from app.schemas import leakage
 from app.services.leakage_detection_service import detect_exact_duplicates, detect_entity_overlap, detect_target_leakage, detect_temporal_leakage, detect_train_test_contamination
 from app.utils.file_storage import validate_upload_file
+from app.api.identity import get_current_user
+from app.services.activity_service import record_user_event
 
 router = APIRouter()
+
+
+def _mark_analysis_failed(db: Session, dataset_id: str, user_id: str) -> None:
+    """Persist failure state without changing the last successful timestamp."""
+    try:
+        db.rollback()
+        dataset = db.query(models.Dataset).filter(
+            models.Dataset.id == dataset_id,
+            models.Dataset.owner_user_id == user_id,
+        ).first()
+        if dataset is not None:
+            dataset.status = "Analysis failed"
+            db.commit()
+            record_user_event(
+                db,
+                user_id=user_id,
+                dataset_id=dataset_id,
+                event_type="analysis",
+                outcome="failed",
+                title="Dataset analysis failed",
+                message=f"Analysis failed for {dataset.name}.",
+                details={"status": "failed"},
+            )
+    except Exception:
+        # Preserve the analysis error if recording status is itself unavailable.
+        try:
+            db.rollback()
+        except Exception:
+            pass
 
 
 from fastapi import Form
@@ -38,7 +72,8 @@ async def create_dataset(
     format: str = Form(...),
     description: str = Form(...),
     file: UploadFile = File(...),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
 ):
     max_size_mb = max(0, int(getattr(settings, "MAX_UPLOAD_SIZE_MB", 100)))
     max_size_bytes = max_size_mb * 1024 * 1024
@@ -62,38 +97,82 @@ async def create_dataset(
             format=format,
             description=description,
             file_content=contents,
-            original_filename=file.filename
+            original_filename=file.filename,
+            owner_user_id=user.id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    record_user_event(
+        db,
+        user_id=user.id,
+        dataset_id=db_dataset.id,
+        event_type="dataset_upload",
+        outcome="completed",
+        title="Dataset uploaded",
+        message=f"{db_dataset.name} was uploaded successfully.",
+        details={"format": db_dataset.format},
+        deduplication_key=f"dataset-upload:{db_dataset.id}",
+    )
     return db_dataset
 
 
 @router.get("/datasets/{dataset_id}/profile", response_model=schemas.DatasetInDB)
-def get_dataset_profile(dataset_id: str, db: Session = Depends(get_db)):
-    dataset = db.query(models.Dataset).filter(models.Dataset.id == dataset_id).first()
+def get_dataset_profile(
+    dataset_id: str,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
+    dataset = db.query(models.Dataset).filter(
+        models.Dataset.id == dataset_id,
+        models.Dataset.owner_user_id == user.id,
+    ).first()
     if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
     return dataset
 
 
 @router.get("/datasets", response_model=List[schemas.DatasetInDB])
-def read_datasets(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
-    datasets = db.query(models.Dataset).offset(skip).limit(limit).all()
+def read_datasets(
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
+    datasets = db.query(models.Dataset).filter(
+        models.Dataset.owner_user_id == user.id
+    ).offset(skip).limit(limit).all()
     return datasets
 
 
 @router.get("/datasets/{dataset_id}", response_model=schemas.DatasetInDB)
-def read_dataset(dataset_id: str, db: Session = Depends(get_db)):
-    dataset = db.query(models.Dataset).filter(models.Dataset.id == dataset_id).first()
+def read_dataset(
+    dataset_id: str,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
+    dataset = db.query(models.Dataset).filter(
+        models.Dataset.id == dataset_id,
+        models.Dataset.owner_user_id == user.id,
+    ).first()
     if dataset is None:
         raise HTTPException(status_code=404, detail="Dataset not found")
     return dataset
 
 
 @router.delete("/datasets/{dataset_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_dataset(dataset_id: str, db: Session = Depends(get_db)):
-    dataset = db.query(models.Dataset).filter(models.Dataset.id == dataset_id).first()
+def delete_dataset(
+    dataset_id: str,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
+    return _delete_dataset_owned(dataset_id, db, user.id)
+
+
+def _delete_dataset_owned(dataset_id: str, db: Session, owner_user_id: str):
+    dataset = db.query(models.Dataset).filter(
+        models.Dataset.id == dataset_id,
+        models.Dataset.owner_user_id == owner_user_id,
+    ).first()
     if dataset is None:
         raise HTTPException(status_code=404, detail="Dataset not found")
 
@@ -138,7 +217,8 @@ def analyze_leakage(
     split_column: Optional[str] = None,
     target_column: Optional[str] = None,
     time_column: Optional[str] = None,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
 ):
     """
     Run leakage analysis for the specified dataset.
@@ -156,69 +236,142 @@ def analyze_leakage(
     - Invalid target_column: return HTTP 400
     - Invalid time_column or split_column: return HTTP 400
     """
+    dataset = db.query(models.Dataset).filter(
+        models.Dataset.id == dataset_id,
+        models.Dataset.owner_user_id == user.id,
+    ).first()
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+
     # Validate parameter combinations first
     # Rule 1: If time_column is provided, split_column must be provided
     if time_column is not None and split_column is None:
+        _mark_analysis_failed(db, dataset_id, user.id)
         raise HTTPException(
             status_code=400,
             detail="Both time_column and split_column must be provided for temporal leakage detection"
         )
     # Rule 2: If entity_column is provided, split_column must be provided
     if entity_column is not None and split_column is None:
+        _mark_analysis_failed(db, dataset_id, user.id)
         raise HTTPException(
             status_code=400,
             detail="Both entity_column and split_column must be provided for entity overlap detection"
         )
     # Note: split_column alone is valid for train/test contamination detection
 
-    # Run exact duplicate detection
-    # Exclude ID column (surrogate key) and split_column when checking for duplicates
-    # (we want to detect when the same data appears in different splits)
-    if split_column is not None:
-        result = detect_exact_duplicates(dataset_id, db, exclude_columns=['id', split_column])
-    else:
-        result = detect_exact_duplicates(dataset_id, db)
-    findings = result['findings']
+    try:
+        # Run exact duplicate detection. A supplied split column is excluded so
+        # otherwise-identical rows in separate partitions can still be found.
+        if split_column is not None:
+            result = detect_exact_duplicates(
+                dataset_id, db, exclude_columns=["id", split_column]
+            )
+        else:
+            result = detect_exact_duplicates(dataset_id, db)
+        findings = result["findings"]
 
-    # Handle target_column parameter
-    if target_column is not None:
-        # Validate that target_column exists (will raise HTTPException if not)
-        target_findings = detect_target_leakage(dataset_id, db, target_column)
-        findings.extend(target_findings)
-        result['findings'] = findings
+        if target_column is not None:
+            findings.extend(detect_target_leakage(dataset_id, db, target_column))
+            result["findings"] = findings
 
-    # Handle temporal leakage parameters
-    if time_column is not None and split_column is not None:
-        # Both provided, run temporal leakage detection
-        temporal_findings = detect_temporal_leakage(dataset_id, db, time_column, split_column)
-        findings.extend(temporal_findings)
-        result['findings'] = findings
+        if time_column is not None and split_column is not None:
+            findings.extend(
+                detect_temporal_leakage(dataset_id, db, time_column, split_column)
+            )
+            result["findings"] = findings
 
-    # Handle entity_column and split_column parameters
-    if entity_column is not None and split_column is not None:
-        # Both provided, run entity overlap detection
-        entity_findings = detect_entity_overlap(dataset_id, db, entity_column, split_column)
-        findings.extend(entity_findings)
-        result['findings'] = findings
-    # If none provided for entity/split, do nothing (findings already contain exact duplicates and/or target leakage and/or temporal leakage)
+        if entity_column is not None and split_column is not None:
+            findings.extend(
+                detect_entity_overlap(dataset_id, db, entity_column, split_column)
+            )
+            result["findings"] = findings
 
-    # Handle train/test contamination parameters
-    if split_column is not None:
-        # Provided, run train/test contamination detection
-        contamination_findings = detect_train_test_contamination(dataset_id, db, split_column)
-        findings.extend(contamination_findings)
-        result['findings'] = findings
+        if split_column is not None:
+            findings.extend(
+                detect_train_test_contamination(dataset_id, db, split_column)
+            )
+            result["findings"] = findings
 
-    return result
+        if target_column is not None or split_column is not None:
+            # Persist only observed counts for explicitly configured columns.
+            source_path = dataset_service.get_dataset_file_path(dataset)
+            if dataset.format.upper() == "CSV":
+                analysis_frame = pd.read_csv(source_path, dtype=str)
+            elif dataset.format.upper() == "XLSX":
+                analysis_frame = pd.read_excel(source_path, dtype=str)
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Configured-column summaries support CSV and XLSX datasets only",
+                )
+            profile = dict(dataset.profile or {})
+            if target_column is not None:
+                target_values = analysis_frame[target_column].dropna()
+                target_values = target_values[target_values.astype(str).str.strip() != ""]
+                counts = target_values.astype(str).value_counts()
+                profile["target_column"] = target_column
+                profile["target_class_counts"] = {
+                    str(label): int(count) for label, count in counts.items()
+                }
+                dataset.class_count = int(len(counts))
+            if split_column is not None:
+                split_values = analysis_frame[split_column].dropna()
+                split_values = split_values[split_values.astype(str).str.strip() != ""]
+                split_counts = split_values.astype(str).value_counts()
+                profile["split_column"] = split_column
+                profile["split_row_counts"] = {
+                    str(label): int(count) for label, count in split_counts.items()
+                }
+            dataset.profile = profile
+
+        profile = dict(dataset.profile or {})
+        profile["analysis_columns"] = {
+            "entity_column": entity_column,
+            "split_column": split_column,
+            "target_column": target_column,
+            "time_column": time_column,
+        }
+        dataset.profile = profile
+        dataset.status = "Analyzed"
+        dataset.last_analysis = datetime.now(timezone.utc)
+        db.add(dataset)
+        db.commit()
+        result_findings = result.get("findings", [])
+        record_user_event(
+            db,
+            user_id=user.id,
+            dataset_id=dataset.id,
+            event_type="analysis",
+            outcome="completed",
+            title="Dataset analysis completed",
+            message=f"Analysis completed for {dataset.name}; {len(result_findings)} findings returned.",
+            details={
+                "finding_count": len(result_findings),
+                "columns": profile["analysis_columns"],
+            },
+            deduplication_key=f"analysis:{dataset.id}:{uuid.uuid4()}",
+        )
+        return result
+    except Exception:
+        _mark_analysis_failed(db, dataset_id, user.id)
+        raise
 
 
 @router.get("/datasets/{dataset_id}/findings", response_model=List[leakage.LeakageFindingRead])
-def get_dataset_findings(dataset_id: str, db: Session = Depends(get_db)):
+def get_dataset_findings(
+    dataset_id: str,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
     """
     Return all LeakageFinding records belonging to the dataset.
     """
     # Verify dataset exists
-    dataset = db.query(models.Dataset).filter(models.Dataset.id == dataset_id).first()
+    dataset = db.query(models.Dataset).filter(
+        models.Dataset.id == dataset_id,
+        models.Dataset.owner_user_id == user.id,
+    ).first()
     if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
     findings = db.query(leakage_models.LeakageFinding).filter(

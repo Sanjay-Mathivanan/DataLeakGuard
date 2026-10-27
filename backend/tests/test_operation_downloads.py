@@ -15,6 +15,17 @@ def _create_operation(
 ):
     db = app.db.session.TestingSessionLocal()
     try:
+        if db.query(models.Dataset.id).filter_by(id="dataset-download-test").first() is None:
+            db.add(
+                models.Dataset(
+                    id="dataset-download-test",
+                    name="Download test dataset",
+                    type="tabular",
+                    format="CSV",
+                    status="Uploaded",
+                )
+            )
+            db.flush()
         operation = models.RepairRecord(
             id=operation_id,
             dataset_id="dataset-download-test",

@@ -43,7 +43,8 @@ def create_dataset_from_upload(
     format: str,        # e.g., 'CSV', 'XLSX', 'ZIP'
     description: str,
     file_content: bytes | bytearray,
-    original_filename: str
+    original_filename: str,
+    owner_user_id: str | None = None,
 ) -> models.Dataset:
     """
     Handle upload: store file, compute hash, profile, create Dataset record.
@@ -101,12 +102,40 @@ def create_dataset_from_upload(
                 # Unique count of non-missing values
                 unique_count_non_missing = int(df[col].dropna().nunique())
                 col_type = str(df[col].dtype)
-                columns_list.append({
+                column_profile = {
                     "name": str(col),
                     "type": col_type,
                     "missingCount": missing_count,
                     "uniqueCount": unique_count_non_missing
-                })
+                }
+
+                if pd.api.types.is_numeric_dtype(df[col]):
+                    numeric_values = pd.to_numeric(df[col], errors="coerce").dropna()
+
+                    def finite_number(value):
+                        if pd.isna(value):
+                            return None
+                        converted = float(value)
+                        return converted if pd.notna(converted) and abs(converted) != float("inf") else None
+
+                    column_profile["statistics"] = {
+                        "kind": "numeric",
+                        "min": finite_number(numeric_values.min()) if not numeric_values.empty else None,
+                        "max": finite_number(numeric_values.max()) if not numeric_values.empty else None,
+                        "mean": finite_number(numeric_values.mean()) if not numeric_values.empty else None,
+                        "median": finite_number(numeric_values.median()) if not numeric_values.empty else None,
+                    }
+                else:
+                    value_counts = df[col].dropna().astype(str).value_counts().head(10)
+                    column_profile["statistics"] = {
+                        "kind": "categorical",
+                        "topValues": [
+                            {"value": str(value), "count": int(count)}
+                            for value, count in value_counts.items()
+                        ],
+                    }
+
+                columns_list.append(column_profile)
             columns = columns_list
 
             # Preview rows (first 6) with NaN replaced by None
@@ -123,6 +152,8 @@ def create_dataset_from_upload(
             type=dataset_type,
             format=format,
             description=description,
+            owner_user_id=owner_user_id,
+            status="Uploaded",
             storage_filename=storage_filename,
             file_sha256=file_sha256,
             profile=profile if profile else None,

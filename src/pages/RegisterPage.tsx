@@ -48,8 +48,8 @@ export const RegisterPage: React.FC = () => {
       error('Validation Error', 'Please enter a valid email address.');
       return;
     }
-    if (!password || password.length < 6) {
-      error('Validation Error', 'Password must be at least 6 characters long.');
+    if (!password || password.length < 12) {
+      error('Validation Error', 'Password must be at least 12 characters long.');
       return;
     }
     if (password !== confirmPassword) {
@@ -64,8 +64,8 @@ export const RegisterPage: React.FC = () => {
     setIsLoading(true);
     try {
       await register(fullName, email, password);
-      success('Registration Successful', 'Your account has been created. Please sign in to continue.');
-      navigate('/login');
+      success('Registration Successful', 'Your account has been created.');
+      navigate('/dashboard');
     } catch (err: any) {
       error('Registration Failed', err?.message || 'An error occurred during account registration.');
     } finally {

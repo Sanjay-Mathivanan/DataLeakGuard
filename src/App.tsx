@@ -23,10 +23,12 @@ import { InferenceProvenancePage } from './pages/InferenceProvenancePage';
 import { DistributionShiftPage } from './pages/DistributionShiftPage';
 import { ReportsPage } from './pages/ReportsPage';
 import { ReportDetailPage } from './pages/ReportDetailPage';
+import { AccountPage } from './pages/AccountPage';
 
 // Protected Route Guard (redirects unauthenticated users to /login)
 const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated, isLoading } = useAuth();
+  if (isLoading) return <div className="p-8 text-sm text-slate-500">Checking session…</div>;
   if (!isAuthenticated) {
     return <Navigate to="/login" replace />;
   }
@@ -35,7 +37,8 @@ const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) =
 
 // Public Only Route Guard (redirects authenticated users to /dashboard)
 const PublicOnlyRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated, isLoading } = useAuth();
+  if (isLoading) return <div className="p-8 text-sm text-slate-500">Checking session…</div>;
   if (isAuthenticated) {
     return <Navigate to="/dashboard" replace />;
   }
@@ -88,6 +91,7 @@ export default function App() {
               <Route path="distribution-shift" element={<DistributionShiftPage />} />
               <Route path="reports" element={<ReportsPage />} />
               <Route path="reports/:id" element={<ReportDetailPage />} />
+              <Route path="account" element={<AccountPage />} />
             </Route>
 
             {/* Catch-all redirect */}

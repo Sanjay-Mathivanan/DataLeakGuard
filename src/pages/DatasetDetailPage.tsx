@@ -14,8 +14,8 @@ import {
   ArrowRight,
   Info
 } from 'lucide-react';
-import { Dataset } from '../types';
-import { getDatasetById } from '../services/api';
+import { Dataset, PersistedFinding } from '../types';
+import { getDatasetById, getDatasetHistory, getFindings } from '../services/api';
 import { StatusBadge } from '../components/common/StatusBadge';
 import { StatCard } from '../components/common/StatCard';
 import { CardSkeleton, TableSkeleton } from '../components/common/LoadingSkeleton';
@@ -37,6 +37,10 @@ export const DatasetDetailPage: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
   const [activeTab, setActiveTab] = useState<'overview' | 'profile' | 'integrity' | 'distribution' | 'history'>('overview');
+  const [findings, setFindings] = useState<PersistedFinding[]>([]);
+  const [history, setHistory] = useState<Array<Record<string, unknown>>>([]);
+  const [tabLoading, setTabLoading] = useState(false);
+  const [tabError, setTabError] = useState('');
 
   useEffect(() => {
     async function load() {
@@ -61,6 +65,24 @@ export const DatasetDetailPage: React.FC = () => {
     }
     load();
   }, [id, error]);
+
+  useEffect(() => {
+    if (!id || !['integrity', 'history'].includes(activeTab)) return;
+    let active = true;
+    setTabLoading(true);
+    setTabError('');
+    const request = activeTab === 'integrity' ? getFindings(id) : getDatasetHistory(id);
+    request.then((data: any) => {
+      if (!active) return;
+      if (activeTab === 'integrity') setFindings(data);
+      else setHistory(data);
+    }).catch((failure: unknown) => {
+      if (active) setTabError(failure instanceof Error ? failure.message : 'Tab data could not be loaded.');
+    }).finally(() => {
+      if (active) setTabLoading(false);
+    });
+    return () => { active = false; };
+  }, [id, activeTab]);
 
   if (loading) {
     return (
@@ -187,10 +209,12 @@ export const DatasetDetailPage: React.FC = () => {
             <div className="p-4 rounded-xl border border-slate-200 bg-white shadow-xs">
               <span className="text-[11px] text-slate-500 block">Target Classes</span>
               <span className="text-xl font-bold font-mono text-slate-900 tabular-nums">
-                {dataset.classCount ?? '—'}
+                {dataset.profile?.targetColumn ? dataset.classCount ?? 'Unavailable' : 'Not configured'}
               </span>
               <span className="text-[10px] text-slate-500 block mt-0.5">
-                Class metadata is not reported by the current profiler
+                {dataset.profile?.targetColumn
+                  ? `Observed classes in ${dataset.profile.targetColumn}`
+                  : 'Select a target column during analysis to compute classes'}
               </span>
             </div>
 
@@ -201,18 +225,18 @@ export const DatasetDetailPage: React.FC = () => {
                 onClick={() => navigate(`/leakage-analysis/${dataset.id}`)}
                 className="mt-1 text-sm font-semibold text-teal-700 hover:text-teal-900"
               >
-                Open findings
+                {findings.length ? `${findings.length} findings · View` : 'View findings'}
               </button>
-              <span className="text-[10px] text-slate-500 block mt-0.5">Finding totals are not included in this response</span>
+              <span className="text-[10px] text-slate-500 block mt-0.5">Counts come from persisted finding records</span>
             </div>
 
             <div className="p-4 rounded-xl border border-slate-200 bg-white shadow-xs">
               <span className="text-[11px] text-slate-500 block">Last Analysis Timestamp</span>
               <span className="text-xs font-mono font-medium text-slate-800 block truncate">
-                {dataset.lastAnalysis != null ? dataset.lastAnalysis.split(' ')[0] : '—'}
+                {dataset.lastAnalysis != null ? new Date(dataset.lastAnalysis).toLocaleString() : 'Not analyzed'}
               </span>
               <span className="text-[10px] text-slate-500 block mt-0.5">
-                {dataset.lastAnalysis != null ? 'Backend-provided metadata' : 'Not reported by the backend'}
+                {dataset.lastAnalysis != null ? 'Most recent successful analysis' : 'No successful analysis is recorded'}
               </span>
             </div>
           </div>
@@ -337,6 +361,7 @@ export const DatasetDetailPage: React.FC = () => {
                     <th className="px-4 py-2.5">Data Type</th>
                     <th className="px-4 py-2.5">Missing Count</th>
                     <th className="px-4 py-2.5">Unique Values</th>
+                    <th className="px-4 py-2.5">Observed Statistics</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
@@ -355,6 +380,13 @@ export const DatasetDetailPage: React.FC = () => {
                       </td>
                       <td className="px-4 py-2.5 font-mono tabular-nums text-slate-700">
                         {typeof col.uniqueCount === 'number' ? col.uniqueCount.toLocaleString() : '—'}
+                      </td>
+                      <td className="px-4 py-2.5 text-slate-600">
+                        {col.statistics?.kind === 'numeric'
+                          ? `min ${col.statistics.min ?? '—'} · max ${col.statistics.max ?? '—'} · mean ${col.statistics.mean ?? '—'} · median ${col.statistics.median ?? '—'}`
+                          : col.statistics?.topValues?.length
+                            ? col.statistics.topValues.map((entry) => `${entry.value} (${entry.count})`).join(', ')
+                            : 'Unavailable'}
                       </td>
                     </tr>
                   ))}
@@ -387,10 +419,26 @@ export const DatasetDetailPage: React.FC = () => {
             </button>
           </div>
 
-          <div className="rounded-lg border border-slate-200 bg-slate-50 p-4 text-xs text-slate-600">
-            The dataset profile does not include a finding summary. An empty profile summary does not
-            establish that every detector ran.
-          </div>
+          {tabLoading && <p className="text-xs text-slate-500">Loading persisted findings…</p>}
+          {tabError && <p role="alert" className="text-xs text-rose-700">{tabError}</p>}
+          {!tabLoading && !tabError && (
+            <>
+              <p className="text-xs text-slate-600">
+                {findings.length} persisted findings · {findings.filter((item) => item.status.toLowerCase() === 'open').length} open
+              </p>
+              {findings.length === 0 ? <p className="rounded-lg border border-slate-200 bg-slate-50 p-4 text-xs text-slate-600">No findings are currently persisted for this dataset.</p> : (
+                <div className="divide-y divide-slate-100 rounded-lg border border-slate-200">
+                  {findings.map((finding) => (
+                    <button key={finding.id} onClick={() => navigate(`/leakage-analysis/${dataset.id}`)} className="w-full p-3 text-left hover:bg-slate-50">
+                      <span className="text-xs font-semibold text-slate-900">{finding.findingType.replaceAll('_', ' ')}</span>
+                      <span className="ml-2 text-[10px] uppercase text-slate-500">{finding.severity} · {finding.status}</span>
+                      <span className="mt-1 block text-xs text-slate-600">{finding.description}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
         </div>
       )}
 
@@ -398,37 +446,39 @@ export const DatasetDetailPage: React.FC = () => {
       {activeTab === 'distribution' && (
         <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-4 shadow-xs">
           <h3 className="text-sm font-semibold text-slate-900">Distribution &amp; Split Information</h3>
-          <div className="rounded-lg border border-slate-200 bg-slate-50 p-4 text-xs text-slate-600">
-            No split sizes or distribution metrics are included in the dataset profile. The current
-            analysis page does not submit split or feature-column selections, so it does not run
-            split-based detectors.
-          </div>
+          {dataset.profile?.splitColumn && dataset.profile.splitRowCounts ? (
+            <div className="space-y-3">
+              <p className="text-xs text-slate-600">Observed split row counts for configured column <strong>{dataset.profile.splitColumn}</strong>. These are descriptive counts, not distribution-shift metrics.</p>
+              <div className="grid sm:grid-cols-2 gap-2">
+                {Object.entries(dataset.profile.splitRowCounts).map(([label, count]) => (
+                  <div key={label} className="rounded-lg border border-slate-200 p-3 flex justify-between text-xs"><span>{label}</span><strong>{count.toLocaleString()} rows</strong></div>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <div className="rounded-lg border border-slate-200 bg-slate-50 p-4 text-xs text-slate-600">
+              Split counts are unavailable. Run analysis with an explicit split column to persist its observed row counts. No distribution-shift detector is implemented here.
+            </div>
+          )}
         </div>
       )}
 
       {/* Tab 5: History */}
       {activeTab === 'history' && (
         <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-3 shadow-xs">
-          <h3 className="text-sm font-semibold text-slate-900">Dataset Timestamps</h3>
-          <div className="space-y-2 text-xs">
-            <div className="p-3 bg-slate-50 rounded-lg border border-slate-200 flex items-center justify-between">
-              <div>
-                <p className="font-semibold text-slate-900">Dataset upload recorded</p>
-                <p className="text-slate-500 text-[11px]">{dataset.uploadedAt}</p>
-              </div>
+          <h3 className="text-sm font-semibold text-slate-900">Persisted dataset history</h3>
+          {tabLoading && <p className="text-xs text-slate-500">Loading history…</p>}
+          {tabError && <p role="alert" className="text-xs text-rose-700">{tabError}</p>}
+          {!tabLoading && !tabError && (history.length ? (
+            <div className="space-y-2">
+              {history.map((event, index) => (
+                <article key={String(event.id ?? index)} className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                  <p className="text-xs font-semibold text-slate-900">{String(event.eventType ?? 'Activity').replaceAll('_', ' ')} · {String(event.outcome ?? 'recorded')}</p>
+                  <p className="mt-1 text-[11px] text-slate-500">{event.createdAt ? new Date(String(event.createdAt)).toLocaleString() : 'Timestamp unavailable'}</p>
+                </article>
+              ))}
             </div>
-
-            {dataset.lastAnalysis ? (
-              <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
-                <p className="font-semibold text-slate-900">Last analysis timestamp recorded</p>
-                <p className="text-slate-500 text-[11px]">{dataset.lastAnalysis}</p>
-              </div>
-            ) : (
-              <p className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-slate-600">
-                No last-analysis timestamp is reported in this dataset record.
-              </p>
-            )}
-          </div>
+          ) : <p className="text-xs text-slate-600">No detailed event history has been recorded for this dataset yet. Older events are not fabricated.</p>)}
         </div>
       )}
     </div>

@@ -338,6 +338,57 @@ def test_repeated_analysis_no_duplicate_findings(client, test_db):
 
     assert len(findings) == 1  # only one finding ever created
 
+
+def test_repeated_analysis_enriches_legacy_hash_evidence_without_recreating(
+    client, test_db
+):
+    csv_content = b"name,age\nAlice,30\nBob,25\nAlice,30\n"
+    response = client.post(
+        f"{API_V1_STR}/datasets",
+        data={
+            "name": "legacy evidence metadata",
+            "type": "tabular",
+            "format": "CSV",
+            "description": "test",
+        },
+        files={"file": ("legacy-evidence.csv", csv_content, "text/csv")},
+    )
+    assert response.status_code == 201
+    dataset_id = response.json()["id"]
+
+    from app.db.session import TestingSessionLocal
+    from app.services.leakage_detection_service import detect_exact_duplicates
+
+    db = TestingSessionLocal()
+    try:
+        first_result = detect_exact_duplicates(dataset_id, db)
+        finding_id = first_result["findings"][0]["id"]
+        finding = (
+            db.query(leakage_models.LeakageFinding)
+            .filter_by(id=finding_id)
+            .one()
+        )
+        original_created_at = finding.created_at
+        # Simulate a finding persisted by the previous evidence format.
+        legacy_evidence = dict(finding.evidence)
+        legacy_evidence.pop("hash_excluded_columns", None)
+        finding.evidence = legacy_evidence
+        db.commit()
+
+        second_result = detect_exact_duplicates(dataset_id, db)
+        findings = (
+            db.query(leakage_models.LeakageFinding)
+            .filter_by(dataset_id=dataset_id, finding_type="exact_duplicate")
+            .all()
+        )
+    finally:
+        db.close()
+
+    assert len(findings) == 1
+    assert second_result["findings"][0]["id"] == finding_id
+    assert findings[0].created_at == original_created_at
+    assert findings[0].evidence["hash_excluded_columns"] == []
+
 def test_controlled_storage_resolution(client, test_db):
     # This test ensures we use Dataset.storage_filename
     csv_content = b"name,age\nAlice,30\nBob,25\nAlice,30\n"

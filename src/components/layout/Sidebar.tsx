@@ -11,7 +11,8 @@ import {
   FileText,
   LogOut,
   X,
-  ExternalLink
+  ExternalLink,
+  UserRound,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 
@@ -31,12 +32,12 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen, onClose }) => {
     { label: 'Inference Provenance', to: '/inference-provenance', icon: KeyRound },
     { label: 'Distribution Shift', to: '/distribution-shift', icon: GitCompare },
     { label: 'Impact Analysis', to: '/impact-analysis', icon: TrendingDown },
-    { label: 'Assurance Reports', to: '/reports', icon: FileText }
+    { label: 'Assurance Reports', to: '/reports', icon: FileText },
+    { label: 'Profile & Account History', to: '/account', icon: UserRound },
   ];
 
   const handleLogout = () => {
-    logout();
-    navigate('/login');
+    void logout().catch(() => undefined).finally(() => navigate('/login'));
   };
 
   return (
@@ -123,11 +124,11 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen, onClose }) => {
           <div className="flex items-center justify-between p-2 rounded-lg bg-white border border-slate-200 shadow-xs">
             <div className="flex items-center gap-2.5 min-w-0">
               <div className="w-8 h-8 rounded-full bg-teal-50 border border-teal-200 flex items-center justify-center text-xs font-bold text-teal-800 shrink-0 font-mono">
-                {user?.name ? user.name.slice(0, 2).toUpperCase() : 'AV'}
+                {user?.name ? user.name.slice(0, 2).toUpperCase() : 'U'}
               </div>
               <div className="min-w-0">
-                <p className="text-xs font-semibold text-slate-800 truncate">{user?.name || 'Dr. Alexis Vance'}</p>
-                <p className="text-[10px] text-slate-500 truncate">{user?.role || 'ML Security Lead'}</p>
+                <p className="text-xs font-semibold text-slate-800 truncate">{user?.name || user?.email || 'Account'}</p>
+                <p className="text-[10px] text-slate-500 truncate">{user?.email || ''}</p>
               </div>
             </div>
 

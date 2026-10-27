@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
-from app.api.v1 import health, datasets, findings, repairs, quarantine
+from app.api.v1 import health, datasets, findings, repairs, quarantine, auth, workspace
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
@@ -24,6 +24,8 @@ app.include_router(datasets.router, prefix=settings.API_V1_STR)
 app.include_router(findings.router, prefix=settings.API_V1_STR)
 app.include_router(repairs.router, prefix=settings.API_V1_STR)
 app.include_router(quarantine.router, prefix=settings.API_V1_STR)
+app.include_router(auth.router, prefix=settings.API_V1_STR)
+app.include_router(workspace.router, prefix=settings.API_V1_STR)
 
 
 @app.get("/")

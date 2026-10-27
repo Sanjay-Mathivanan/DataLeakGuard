@@ -4,9 +4,8 @@ from sqlalchemy.orm import Session
 from fastapi import HTTPException, status
 from typing import Optional, List
 from app.db import models, leakage_models
+from app.utils.file_storage import ORIGINAL_DIR
 from app.utils.row_hashing import hash_row
-
-STORAGE_BASE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "storage", "original"))
 
 def detect_exact_duplicates(dataset_id: str, db: Session, exclude_columns: Optional[List[str]] = None):
     """
@@ -24,7 +23,7 @@ def detect_exact_duplicates(dataset_id: str, db: Session, exclude_columns: Optio
         raise HTTPException(status_code=404, detail="Dataset not found")
 
     # Build storage path
-    storage_path = os.path.join(STORAGE_BASE, dataset.storage_filename)
+    storage_path = ORIGINAL_DIR / dataset.storage_filename
     if not os.path.exists(storage_path):
         raise HTTPException(status_code=404, detail="Stored file not found")
 
@@ -40,12 +39,18 @@ def detect_exact_duplicates(dataset_id: str, db: Session, exclude_columns: Optio
         raise HTTPException(status_code=400, detail=f"Failed to read file: {str(e)}")
 
 
-    # Apply exclusions if specified
-    if exclude_columns:
-        # Only exclude columns that actually exist in the dataframe
-        existing_exclusions = [col for col in exclude_columns if col in df.columns]
-        if existing_exclusions:
-            df = df.drop(columns=existing_exclusions)
+    # Persist the exact columns used to compute each hash. A later repair
+    # cannot safely infer this from the dataset's current analysis settings,
+    # since the same dataset may have been analyzed with different settings.
+    existing_exclusions = list(
+        dict.fromkeys(
+            column
+            for column in (exclude_columns or [])
+            if isinstance(column, str) and column in df.columns
+        )
+    )
+    if existing_exclusions:
+        df = df.drop(columns=existing_exclusions)
 
     # Compute hash for each row
     df['_hash'] = df.apply(hash_row, axis=1)
@@ -68,15 +73,46 @@ def detect_exact_duplicates(dataset_id: str, db: Session, exclude_columns: Optio
             evidence = {
                 "hash": hash_val,
                 "duplicate_count": group_size,
-                "row_indices": group.index.tolist()  # zero-based row numbers in the dataframe
+                "row_indices": group.index.tolist(),  # zero-based row numbers in the dataframe
+                "hash_excluded_columns": existing_exclusions,
             }
 
-            # Check if finding already exists (idempotency)
+            # Check if finding already exists (idempotency). Also recognize
+            # legacy evidence without hash_excluded_columns and enrich that
+            # same record rather than creating a duplicate or changing its
+            # original creation timestamp.
             existing = db.query(leakage_models.LeakageFinding).filter(
                 leakage_models.LeakageFinding.dataset_id == dataset_id,
                 leakage_models.LeakageFinding.finding_type == "exact_duplicate",
                 leakage_models.LeakageFinding.evidence == evidence
             ).first()
+            if existing is None:
+                candidates = db.query(leakage_models.LeakageFinding).filter(
+                    leakage_models.LeakageFinding.dataset_id == dataset_id,
+                    leakage_models.LeakageFinding.finding_type == "exact_duplicate",
+                ).all()
+                for candidate in candidates:
+                    candidate_evidence = candidate.evidence
+                    if not isinstance(candidate_evidence, dict):
+                        continue
+                    if any(
+                        candidate_evidence.get(key) != evidence[key]
+                        for key in ("hash", "duplicate_count", "row_indices")
+                    ):
+                        continue
+                    prior_exclusions = candidate_evidence.get(
+                        "hash_excluded_columns"
+                    )
+                    if prior_exclusions is None:
+                        candidate.evidence = {
+                            **candidate_evidence,
+                            "hash_excluded_columns": existing_exclusions,
+                        }
+                        existing = candidate
+                        break
+                    if prior_exclusions == existing_exclusions:
+                        existing = candidate
+                        break
 
             if existing:
                 # Per requirements: preserve original created_at, do not refresh
@@ -138,7 +174,7 @@ def detect_entity_overlap(
         raise HTTPException(status_code=404, detail="Dataset not found")
 
     # Build storage path
-    storage_path = os.path.join(STORAGE_BASE, dataset.storage_filename)
+    storage_path = ORIGINAL_DIR / dataset.storage_filename
     if not os.path.exists(storage_path):
         raise HTTPException(status_code=404, detail="Stored file not found")
 
@@ -299,7 +335,7 @@ def detect_target_leakage(
         raise HTTPException(status_code=404, detail="Dataset not found")
 
     # Build storage path
-    storage_path = os.path.join(STORAGE_BASE, dataset.storage_filename)
+    storage_path = ORIGINAL_DIR / dataset.storage_filename
     if not os.path.exists(storage_path):
         raise HTTPException(status_code=404, detail="Stored file not found")
 
@@ -545,7 +581,7 @@ def detect_temporal_leakage(
         raise HTTPException(status_code=404, detail="Dataset not found")
 
     # Build storage path
-    storage_path = os.path.join(STORAGE_BASE, dataset.storage_filename)
+    storage_path = ORIGINAL_DIR / dataset.storage_filename
     if not os.path.exists(storage_path):
         raise HTTPException(status_code=404, detail="Stored file not found")
 
@@ -758,7 +794,7 @@ def detect_train_test_contamination(
         raise HTTPException(status_code=404, detail="Dataset not found")
 
     # Build storage path
-    storage_path = os.path.join(STORAGE_BASE, dataset.storage_filename)
+    storage_path = ORIGINAL_DIR / dataset.storage_filename
     if not os.path.exists(storage_path):
         raise HTTPException(status_code=404, detail="Stored file not found")
 

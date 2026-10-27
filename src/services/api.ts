@@ -64,6 +64,196 @@ const toCamelCase = (obj: any): any => {
 const getApiBaseUrl = (): string =>
   (import.meta.env?.VITE_API_BASE_URL || '/api/v1').replace(/\/+$/, '');
 
+const getCookie = (name: string): string | null => {
+  if (typeof document === 'undefined') return null;
+  const prefix = `${name}=`;
+  const item = document.cookie.split('; ').find((cookie) => cookie.startsWith(prefix));
+  return item ? decodeURIComponent(item.slice(prefix.length)) : null;
+};
+
+export async function apiFetch(
+  input: RequestInfo | URL,
+  init: RequestInit = {}
+): Promise<Response> {
+  const headers = new Headers(init.headers);
+  const method = (init.method ?? 'GET').toUpperCase();
+  const csrfToken = getCookie('dlg_csrf');
+  if (csrfToken && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
+    headers.set('X-CSRF-Token', csrfToken);
+  }
+  return fetch(input, {
+    ...init,
+    headers,
+    credentials: 'include',
+  });
+}
+
+export interface ApiUser {
+  id: string;
+  email: string;
+  displayName: string;
+  createdAt: string;
+}
+
+export interface ApiAuthResponse {
+  user: ApiUser;
+  csrfToken: string;
+}
+
+export interface ApiNotification {
+  id: string;
+  eventType: string;
+  title: string;
+  message: string;
+  createdAt: string;
+  readAt: string | null;
+  datasetId: string | null;
+  findingId: string | null;
+  operationId: string | null;
+}
+
+export interface DashboardSummary {
+  datasetCount: number;
+  findingCount: number;
+  openFindingCount: number;
+  highOrCriticalFindingCount: number;
+  latestAnalysisAt: string | null;
+  recentDatasets: Array<{
+    id: string;
+    name: string;
+    status: string | null;
+    lastAnalysis: string | null;
+  }>;
+  recentOperations: Array<{
+    id: string;
+    datasetId: string;
+    operationType: string;
+    status: string;
+    createdAt: string | null;
+  }>;
+  models: { available: boolean; reason?: string };
+  reports: { available: boolean; reason?: string };
+}
+
+async function readApiError(response: Response, fallback: string): Promise<Error> {
+  try {
+    const body: unknown = await response.json();
+    if (isRecord(body) && typeof body.detail === 'string') return new Error(body.detail);
+  } catch {
+    // Fall through to status-based message.
+  }
+  return new Error(`${fallback} (${response.status})`);
+}
+
+export async function loginApi(email: string, password: string): Promise<ApiAuthResponse> {
+  const response = await apiFetch(`${getApiBaseUrl()}/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password }),
+  });
+  if (!response.ok) throw await readApiError(response, 'Login failed');
+  return toCamelCase(await response.json());
+}
+
+export async function registerApi(
+  displayName: string,
+  email: string,
+  password: string
+): Promise<ApiAuthResponse> {
+  const response = await apiFetch(`${getApiBaseUrl()}/auth/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ display_name: displayName, email, password }),
+  });
+  if (!response.ok) throw await readApiError(response, 'Registration failed');
+  return toCamelCase(await response.json());
+}
+
+export async function getCurrentUserApi(): Promise<ApiAuthResponse | null> {
+  const response = await apiFetch(`${getApiBaseUrl()}/auth/me`);
+  if (response.status === 401) return null;
+  if (!response.ok) throw await readApiError(response, 'Could not load the current user');
+  return toCamelCase(await response.json());
+}
+
+export async function logoutApi(): Promise<void> {
+  const response = await apiFetch(`${getApiBaseUrl()}/auth/logout`, { method: 'POST' });
+  if (!response.ok) throw await readApiError(response, 'Logout failed');
+}
+
+export async function updateProfileApi(payload: {
+  displayName: string;
+  email: string;
+}): Promise<ApiUser> {
+  const response = await apiFetch(`${getApiBaseUrl()}/auth/profile`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ display_name: payload.displayName, email: payload.email }),
+  });
+  if (!response.ok) throw await readApiError(response, 'Profile update failed');
+  return toCamelCase(await response.json());
+}
+
+export async function changePasswordApi(
+  currentPassword: string,
+  newPassword: string
+): Promise<void> {
+  const response = await apiFetch(`${getApiBaseUrl()}/auth/password`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+  });
+  if (!response.ok) throw await readApiError(response, 'Password change failed');
+}
+
+export async function getDashboardSummary(): Promise<DashboardSummary> {
+  const response = await apiFetch(`${getApiBaseUrl()}/dashboard/summary`);
+  if (!response.ok) throw await readApiError(response, 'Could not load dashboard data');
+  return toCamelCase(await response.json());
+}
+
+export async function getNotifications(): Promise<ApiNotification[]> {
+  const response = await apiFetch(`${getApiBaseUrl()}/notifications?limit=30`);
+  if (!response.ok) throw await readApiError(response, 'Could not load notifications');
+  return toCamelCase(await response.json());
+}
+
+export async function markNotificationRead(id: string): Promise<void> {
+  const response = await apiFetch(
+    `${getApiBaseUrl()}/notifications/${encodeURIComponent(id)}/read`,
+    { method: 'POST' }
+  );
+  if (!response.ok) throw await readApiError(response, 'Could not update notification');
+}
+
+export async function markAllNotificationsRead(): Promise<void> {
+  const response = await apiFetch(`${getApiBaseUrl()}/notifications/read-all`, { method: 'POST' });
+  if (!response.ok) throw await readApiError(response, 'Could not update notifications');
+}
+
+export async function getAccountHistory(limit = 100): Promise<Array<Record<string, unknown>>> {
+  const response = await apiFetch(`${getApiBaseUrl()}/account/history?limit=${limit}`);
+  if (!response.ok) throw await readApiError(response, 'Could not load account history');
+  const data: unknown = await response.json();
+  return Array.isArray(data) ? data.map(toCamelCase) : [];
+}
+
+export async function getDatasetHistory(datasetId: string): Promise<Array<Record<string, unknown>>> {
+  const response = await apiFetch(
+    `${getApiBaseUrl()}/datasets/${encodeURIComponent(datasetId)}/history`
+  );
+  if (!response.ok) throw await readApiError(response, 'Could not load dataset history');
+  const data: unknown = await response.json();
+  return Array.isArray(data) ? data.map(toCamelCase) : [];
+}
+
+export async function changePassword(
+  currentPassword: string,
+  newPassword: string
+): Promise<void> {
+  await changePasswordApi(currentPassword, newPassword);
+}
+
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === 'object' && !Array.isArray(value);
 
@@ -123,7 +313,7 @@ export function summarizeFindings(
 // ==========================================
 
 export async function getDatasets(): Promise<Dataset[]> {
-  const res = await fetch(`${getApiBaseUrl()}/datasets`);
+  const res = await apiFetch(`${getApiBaseUrl()}/datasets`);
   if (!res.ok) {
     throw new Error(`Failed to fetch datasets: ${res.status}`);
   }
@@ -135,7 +325,7 @@ export async function getDatasets(): Promise<Dataset[]> {
 }
 
 export async function getDatasetById(id: string): Promise<Dataset | null> {
-  const res = await fetch(`${getApiBaseUrl()}/datasets/${encodeURIComponent(id)}`);
+  const res = await apiFetch(`${getApiBaseUrl()}/datasets/${encodeURIComponent(id)}`);
   if (res.status === 404) {
     return null;
   }
@@ -170,7 +360,7 @@ export async function uploadDataset(payload: {
   formData.append('description', payload.description);
   formData.append('file', payload.file);
 
-  const res = await fetch(`${getApiBaseUrl()}/datasets`, {
+  const res = await apiFetch(`${getApiBaseUrl()}/datasets`, {
     method: 'POST',
     body: formData,
   });
@@ -182,7 +372,7 @@ export async function uploadDataset(payload: {
 }
 
 export async function deleteDataset(id: string): Promise<boolean> {
-  const res = await fetch(`${getApiBaseUrl()}/datasets/${encodeURIComponent(id)}`, {
+  const res = await apiFetch(`${getApiBaseUrl()}/datasets/${encodeURIComponent(id)}`, {
     method: 'DELETE',
   });
   if (!res.ok) {
@@ -345,7 +535,7 @@ export async function runDatasetAnalysis(
     ? `${url.pathname}${url.search}`
     : url.toString();
 
-  const response = await fetch(requestUrl, { method: 'POST' });
+  const response = await apiFetch(requestUrl, { method: 'POST' });
   if (!response.ok) {
     let detail = '';
     try {
@@ -399,7 +589,7 @@ export async function getCategoryOverviews(
 }
 
 export async function getFindings(datasetId: string): Promise<PersistedFinding[]> {
-  const response = await fetch(
+  const response = await apiFetch(
     `${getApiBaseUrl()}/datasets/${encodeURIComponent(datasetId)}/findings`
   );
   if (!response.ok) {
@@ -414,7 +604,7 @@ export async function getFindings(datasetId: string): Promise<PersistedFinding[]
 }
 
 export async function getFindingById(findingId: string): Promise<PersistedFinding | null> {
-  const response = await fetch(
+  const response = await apiFetch(
     `${getApiBaseUrl()}/findings/${encodeURIComponent(findingId)}`
   );
   if (response.status === 404) {
@@ -555,7 +745,7 @@ export async function getDatasetOperationHistory(
 ): Promise<DatasetOperationRecord[]> {
   // This existing route returns RepairRecord history for the dataset, including
   // both repair and quarantine operation types.
-  const response = await fetch(
+  const response = await apiFetch(
     `${getApiBaseUrl()}/datasets/${encodeURIComponent(datasetId)}/repairs`
   );
   if (!response.ok) {
@@ -577,7 +767,7 @@ export async function generateCombinedCleanedDataset(
     throw new Error('Select at least one eligible exact-duplicate finding.');
   }
 
-  const response = await fetch(
+  const response = await apiFetch(
     `${getApiBaseUrl()}/datasets/${encodeURIComponent(datasetId)}/repairs/combined`,
     {
       method: 'POST',
@@ -661,7 +851,7 @@ function getSafeDownloadFilename(response: Response): string {
 export async function downloadOperationOutput(
   operationId: string
 ): Promise<OperationOutputDownload> {
-  const response = await fetch(
+  const response = await apiFetch(
     `${getApiBaseUrl()}/operations/${encodeURIComponent(operationId)}/download`
   );
   if (!response.ok) {
@@ -688,7 +878,7 @@ async function createFindingOperation(
   findingId: string,
   operationType: FindingOperationType
 ): Promise<DatasetOperationRecord> {
-  const response = await fetch(
+  const response = await apiFetch(
     `${getApiBaseUrl()}/findings/${encodeURIComponent(findingId)}/${operationType}`,
     { method: 'POST' }
   );
@@ -996,22 +1186,17 @@ export async function deleteReport(id: string): Promise<boolean> {
 // ==========================================
 
 export async function getActivities(): Promise<Activity[]> {
-  await delay(150);
-  return [...activitiesStore];
+  const history = await getAccountHistory(30);
+  return history.map((event, index) => ({
+    id: String(event.id ?? index),
+    type: String(event.eventType ?? 'activity'),
+    title: String(event.eventType ?? 'Activity').replaceAll('_', ' '),
+    description: `${String(event.outcome ?? 'recorded')}${event.datasetId ? ` · dataset ${event.datasetId}` : ''}`,
+    timestamp: event.createdAt ? new Date(String(event.createdAt)).toLocaleString() : 'Timestamp unavailable',
+    targetId: event.datasetId ? String(event.datasetId) : undefined,
+  }));
 }
 
 export async function getDashboardStats() {
-  await delay(200);
-  return {
-    datasetsAnalyzed: datasetsStore.length,
-    issuesDetected: datasetsStore.reduce((acc, d) => acc + d.issuesCount, 0),
-    modelsVerified: modelsStore.length,
-    reportsGenerated: reportsStore.length,
-    criticalFindings: 24,
-    performanceInflation: '+7.4%',
-    distributionShifts: 1,
-    provenanceRecords: inferenceStore.length,
-    overallPipelineStatus: 'REVIEW REQUIRED',
-    overallConfidence: 91
-  };
+  return getDashboardSummary();
 }

@@ -1,6 +1,6 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, field_serializer
 from typing import Optional, List, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
 
 class DatasetBase(BaseModel):
     name: str
@@ -29,3 +29,11 @@ class DatasetInDB(DatasetBase):
 
     class Config:
         orm_mode = True
+
+    @field_serializer("last_analysis")
+    def serialize_last_analysis(self, value: Optional[datetime]):
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.isoformat()

@@ -6,7 +6,10 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
+from app.db import models, leakage_models
 from app.db.session import get_db
+from app.api.identity import get_current_user
+from app.services.activity_service import record_user_event
 from app.services.repair_service import (
     generate_combined_exact_duplicate_repair,
     repair_exact_duplicates,
@@ -35,7 +38,11 @@ class CombinedRepairRequest(BaseModel):
 
 
 @router.post("/findings/{finding_id}/repair", status_code=status.HTTP_201_CREATED)
-def repair_finding(finding_id: str, db: Session = Depends(get_db)):
+def repair_finding(
+    finding_id: str,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
     """
     Repair a specific finding by creating a processed version of the dataset
     with the identified issue resolved.
@@ -43,35 +50,66 @@ def repair_finding(finding_id: str, db: Session = Depends(get_db)):
     # In a real implementation, we would extract dataset_id from the finding
     # or require it as a parameter. For now, we'll need to get the finding
     # first to determine which dataset it belongs to.
-    from app.db import leakage_models
-
-    finding = db.query(leakage_models.LeakageFinding).filter(
-        leakage_models.LeakageFinding.id == finding_id
+    finding = db.query(leakage_models.LeakageFinding).join(
+        models.Dataset, models.Dataset.id == leakage_models.LeakageFinding.dataset_id
+    ).filter(
+        leakage_models.LeakageFinding.id == finding_id,
+        models.Dataset.owner_user_id == user.id,
     ).first()
     if not finding:
         raise HTTPException(status_code=404, detail="Finding not found")
 
     # Call the repair service
-    result = repair_exact_duplicates(
+    try:
+        result = repair_exact_duplicates(
+            dataset_id=finding.dataset_id,
+            finding_id=finding_id,
+            db=db
+        )
+    except Exception:
+        record_user_event(
+            db,
+            user_id=user.id,
+            dataset_id=finding.dataset_id,
+            finding_id=finding_id,
+            event_type="repair",
+            outcome="failed",
+            title="Repair failed",
+            message="The repair operation did not complete.",
+        )
+        raise
+    operation_id = result.get("repair_id") or result.get("id")
+    record_user_event(
+        db,
+        user_id=user.id,
         dataset_id=finding.dataset_id,
         finding_id=finding_id,
-        db=db
+        operation_id=operation_id,
+        event_type="repair",
+        outcome="completed",
+        title="Repair completed",
+        message="An approved repair operation completed.",
+        deduplication_key=f"repair:{operation_id}" if operation_id else None,
     )
     return result
 
 
 @router.post("/datasets/{dataset_id}/repairs", status_code=status.HTTP_201_CREATED)
-def repair_dataset(dataset_id: str, db: Session = Depends(get_db)):
+def repair_dataset(
+    dataset_id: str,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
     """
     Repair all applicable findings in a dataset.
     Currently processes exact_duplicate findings.
     """
-    from app.db import leakage_models, models
     from app.services.repair_service import repair_exact_duplicates
 
     # Verify dataset exists
     dataset = db.query(models.Dataset).filter(
-        models.Dataset.id == dataset_id
+        models.Dataset.id == dataset_id,
+        models.Dataset.owner_user_id == user.id,
     ).first()
     if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
@@ -92,6 +130,19 @@ def repair_dataset(dataset_id: str, db: Session = Depends(get_db)):
             db=db
         )
         repair_results.append(result)
+        operation_id = result.get("repair_id") or result.get("id")
+        record_user_event(
+            db,
+            user_id=user.id,
+            dataset_id=dataset_id,
+            finding_id=finding.id,
+            operation_id=operation_id,
+            event_type="repair",
+            outcome="completed",
+            title="Repair completed",
+            message="An approved repair operation completed.",
+            deduplication_key=f"repair:{operation_id}" if operation_id else None,
+        )
 
     return repair_results
 
@@ -104,24 +155,67 @@ def repair_dataset_combined(
     dataset_id: str,
     request: CombinedRepairRequest,
     db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
 ):
     """Generate one cleaned copy from user-selected exact-duplicate findings."""
-    return generate_combined_exact_duplicate_repair(
+    dataset = db.query(models.Dataset).filter(
+        models.Dataset.id == dataset_id,
+        models.Dataset.owner_user_id == user.id,
+    ).first()
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    try:
+        result = generate_combined_exact_duplicate_repair(
+            dataset_id=dataset_id,
+            selected_finding_ids=request.selected_finding_ids,
+            db=db,
+        )
+    except Exception:
+        record_user_event(
+            db,
+            user_id=user.id,
+            dataset_id=dataset_id,
+            event_type="combined_repair",
+            outcome="failed",
+            title="Combined repair failed",
+            message="The selected findings could not be applied to a cleaned output.",
+            details={"selected_finding_ids": request.selected_finding_ids},
+        )
+        raise
+    operation_id = result.get("id")
+    record_user_event(
+        db,
+        user_id=user.id,
         dataset_id=dataset_id,
-        selected_finding_ids=request.selected_finding_ids,
-        db=db,
+        operation_id=operation_id,
+        event_type="combined_repair",
+        outcome="completed",
+        title="Combined repair completed",
+        message="A cleaned dataset was generated from selected duplicate findings.",
+        details={
+            "applied_finding_ids": (result.get("operation_metadata") or {}).get("applied_finding_ids", []),
+            "skipped_findings": (result.get("operation_metadata") or {}).get("skipped_findings", []),
+            "duplicate_rows_removed": result.get("affected_rows"),
+        },
+        deduplication_key=f"combined-repair:{operation_id}" if operation_id else None,
     )
+    return result
 
 
 @router.get("/repairs/{repair_id}")
-def get_repair(repair_id: str, db: Session = Depends(get_db)):
+def get_repair(
+    repair_id: str,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
     """
     Get a specific repair record by its ID.
     """
-    from app.db import models
-
     repair_record = db.query(models.RepairRecord).filter(
-        models.RepairRecord.id == repair_id
+        models.RepairRecord.id == repair_id,
+        models.RepairRecord.dataset_id.in_(
+            db.query(models.Dataset.id).filter(models.Dataset.owner_user_id == user.id)
+        ),
     ).first()
     if not repair_record:
         raise HTTPException(status_code=404, detail="Repair not found")
@@ -164,15 +258,18 @@ def get_repair(repair_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/datasets/{dataset_id}/repairs")
-def get_dataset_repairs(dataset_id: str, db: Session = Depends(get_db)):
+def get_dataset_repairs(
+    dataset_id: str,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
     """
     Get all repair records for a specific dataset.
     """
-    from app.db import models
-
     # Verify dataset exists
     dataset = db.query(models.Dataset).filter(
-        models.Dataset.id == dataset_id
+        models.Dataset.id == dataset_id,
+        models.Dataset.owner_user_id == user.id,
     ).first()
     if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
@@ -222,12 +319,15 @@ def get_dataset_repairs(dataset_id: str, db: Session = Depends(get_db)):
 def download_operation_output(
     operation_id: str,
     db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
 ):
     """Download a completed repair or quarantine output by operation ID."""
-    from app.db import models
-
-    operation = db.query(models.RepairRecord).filter(
-        models.RepairRecord.id == operation_id
+    operation = db.query(models.RepairRecord).join(
+        models.Dataset,
+        models.Dataset.id == models.RepairRecord.dataset_id,
+    ).filter(
+        models.RepairRecord.id == operation_id,
+        models.Dataset.owner_user_id == user.id,
     ).first()
     if operation is None:
         raise HTTPException(status_code=404, detail="Operation not found")

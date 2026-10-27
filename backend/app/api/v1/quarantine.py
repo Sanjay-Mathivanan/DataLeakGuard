@@ -1,45 +1,82 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
+from app.db import models, leakage_models
 from app.db.session import get_db
 from app.services.quarantine_service import quarantine_finding
+from app.api.identity import get_current_user
+from app.services.activity_service import record_user_event
 
 router = APIRouter()
 
 
 @router.post("/findings/{finding_id}/quarantine", status_code=status.HTTP_201_CREATED)
-def quarantine_finding_endpoint(finding_id: str, db: Session = Depends(get_db)):
+def quarantine_finding_endpoint(
+    finding_id: str,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
     """
     Quarantine a specific finding by creating a quarantined version of the dataset
     containing only the affected rows.
     """
     # Get the finding first to determine which dataset it belongs to
-    from app.db import leakage_models
-
-    finding = db.query(leakage_models.LeakageFinding).filter(
-        leakage_models.LeakageFinding.id == finding_id
+    finding = db.query(leakage_models.LeakageFinding).join(
+        models.Dataset, models.Dataset.id == leakage_models.LeakageFinding.dataset_id
+    ).filter(
+        leakage_models.LeakageFinding.id == finding_id,
+        models.Dataset.owner_user_id == user.id,
     ).first()
     if not finding:
         raise HTTPException(status_code=404, detail="Finding not found")
 
     # Call the quarantine service
-    result = quarantine_finding(
+    try:
+        result = quarantine_finding(
+            dataset_id=finding.dataset_id,
+            finding_id=finding_id,
+            db=db
+        )
+    except Exception:
+        record_user_event(
+            db,
+            user_id=user.id,
+            dataset_id=finding.dataset_id,
+            finding_id=finding_id,
+            event_type="quarantine",
+            outcome="failed",
+            title="Quarantine failed",
+            message="The quarantine operation did not complete.",
+        )
+        raise
+    operation_id = result.get("quarantine_id") or result.get("id")
+    record_user_event(
+        db,
+        user_id=user.id,
         dataset_id=finding.dataset_id,
         finding_id=finding_id,
-        db=db
+        operation_id=operation_id,
+        event_type="quarantine",
+        outcome="completed",
+        title="Quarantine completed",
+        message="An approved quarantine operation completed.",
+        deduplication_key=f"quarantine:{operation_id}" if operation_id else None,
     )
     return result
 
 
 @router.get("/datasets/{dataset_id}/quarantines")
-def get_dataset_quarantines(dataset_id: str, db: Session = Depends(get_db)):
+def get_dataset_quarantines(
+    dataset_id: str,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
     """
     Get all quarantine records for a specific dataset.
     """
-    from app.db import models
-
     # Verify dataset exists
     dataset = db.query(models.Dataset).filter(
-        models.Dataset.id == dataset_id
+        models.Dataset.id == dataset_id,
+        models.Dataset.owner_user_id == user.id,
     ).first()
     if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
@@ -77,15 +114,20 @@ def get_dataset_quarantines(dataset_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/quarantines/{quarantine_id}")
-def get_quarantine(quarantine_id: str, db: Session = Depends(get_db)):
+def get_quarantine(
+    quarantine_id: str,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
     """
     Get a specific quarantine record by its ID.
     """
-    from app.db import models
-
     quarantine_record = db.query(models.RepairRecord).filter(
         models.RepairRecord.id == quarantine_id,
-        models.RepairRecord.operation_type == "quarantine"
+        models.RepairRecord.operation_type == "quarantine",
+        models.RepairRecord.dataset_id.in_(
+            db.query(models.Dataset.id).filter(models.Dataset.owner_user_id == user.id)
+        ),
     ).first()
     if not quarantine_record:
         raise HTTPException(status_code=404, detail="Quarantine not found")

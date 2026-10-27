@@ -7,12 +7,11 @@ import { useToast } from '../context/ToastContext';
 export const LoginPage: React.FC = () => {
   const navigate = useNavigate();
   const { login } = useAuth();
-  const { success, error, info } = useToast();
+  const { success, error } = useToast();
 
-  const [email, setEmail] = useState('a.vance@integrity-lab.org');
-  const [password, setPassword] = useState('SecurityDemo2026!');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
-  const [rememberMe, setRememberMe] = useState(true);
   const [isLoading, setIsLoading] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -24,7 +23,7 @@ export const LoginPage: React.FC = () => {
 
     setIsLoading(true);
     try {
-      await login(email, password, rememberMe);
+      await login(email, password);
       success('Authentication Successful', 'Welcome to DataLeakGuard-CV console.');
       navigate('/dashboard');
     } catch (err: any) {
@@ -59,26 +58,26 @@ export const LoginPage: React.FC = () => {
               Evidence-based integrity assurance for trustworthy ML pipelines.
             </h2>
             <p className="text-sm text-slate-600 mt-4 leading-relaxed">
-              Detect duplicate leakage, train-test contamination, patient overlap in CV cohorts,
-              verify model hashes, and audit cryptographic inference provenance.
+              Profile tabular datasets, inspect persisted leakage findings and evidence, and review
+              approved repair, quarantine, and combined-cleaning operations.
             </p>
 
             <div className="mt-8 space-y-3">
               <div className="flex items-center gap-2.5 text-xs text-slate-700">
                 <CheckCircle2 className="w-4 h-4 text-teal-600 shrink-0" />
-                <span>Rigorous 6-fold tabular & computer vision leakage detection</span>
+                <span>Five implemented, column-configurable tabular leakage detectors</span>
               </div>
               <div className="flex items-center gap-2.5 text-xs text-slate-700">
                 <CheckCircle2 className="w-4 h-4 text-teal-600 shrink-0" />
-                <span>Automated quarantine, sanitization & retrained performance delta</span>
+                <span>Persistent findings, evidence, and operation history</span>
               </div>
               <div className="flex items-center gap-2.5 text-xs text-slate-700">
                 <CheckCircle2 className="w-4 h-4 text-teal-600 shrink-0" />
-                <span>HMAC signed inference provenance with tamper simulation</span>
+                <span>Approved repair and quarantine with hash-verified output downloads</span>
               </div>
               <div className="flex items-center gap-2.5 text-xs text-slate-700">
                 <CheckCircle2 className="w-4 h-4 text-teal-600 shrink-0" />
-                <span>Evidence-based risk auditing & project disposition reports</span>
+                <span>Combined exact-duplicate cleanup on a separate output copy</span>
               </div>
             </div>
           </div>
@@ -119,13 +118,7 @@ export const LoginPage: React.FC = () => {
                 <label className="block text-xs font-medium text-slate-700">
                   Password
                 </label>
-                <button
-                  type="button"
-                  onClick={() => info('Password Reset', 'Password recovery instructions have been sent to your registered email.')}
-                  className="text-[11px] text-teal-700 hover:underline"
-                >
-                  Forgot Password?
-                </button>
+                <span className="text-[11px] text-slate-400">Password recovery is not available</span>
               </div>
               <div className="relative">
                 <Lock className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
@@ -146,19 +139,6 @@ export const LoginPage: React.FC = () => {
                   {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                 </button>
               </div>
-            </div>
-
-            <div className="flex items-center">
-              <input
-                id="remember"
-                type="checkbox"
-                checked={rememberMe}
-                onChange={(e) => setRememberMe(e.target.checked)}
-                className="w-3.5 h-3.5 rounded bg-white border-slate-300 text-teal-600 focus:ring-0 focus:ring-offset-0 cursor-pointer"
-              />
-              <label htmlFor="remember" className="ml-2 text-xs text-slate-600 cursor-pointer select-none">
-                Remember Me
-              </label>
             </div>
 
             <button

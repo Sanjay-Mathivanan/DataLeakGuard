@@ -35,6 +35,21 @@ def test_upload_csv(client):
     assert data["profile"] is not None
     assert data["profile"]["row_count"] == 3
     assert data["profile"]["column_count"] == 2
+    assert data["status"] == "Uploaded"
+    age_profile = next(column for column in data["columns"] if column["name"] == "age")
+    assert age_profile["statistics"] == {
+        "kind": "numeric",
+        "min": 25.0,
+        "max": 30.0,
+        "mean": 28.333333333333332,
+        "median": 30.0,
+    }
+    name_profile = next(column for column in data["columns"] if column["name"] == "name")
+    assert name_profile["statistics"]["kind"] == "categorical"
+    assert name_profile["statistics"]["topValues"][0] == {
+        "value": "Alice",
+        "count": 2,
+    }
     # Verify file exists
     storage_path = ORIGINAL_DIR / data["storage_filename"]
     assert os.path.exists(storage_path)

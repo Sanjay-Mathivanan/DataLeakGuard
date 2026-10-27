@@ -56,6 +56,71 @@ def test_analyze_valid_dataset(client, test_db):
         db.close()
 
 
+def test_successful_analysis_persists_timestamp_and_target_class_counts(client, test_db):
+    upload = client.post(
+        "/api/v1/datasets",
+        data={
+            "name": "target profile",
+            "type": "tabular",
+            "format": "CSV",
+            "description": "target distribution test",
+        },
+        files={
+            "file": (
+                "target.csv",
+                b"feature,target\nA,yes\nB,no\nA,yes\n",
+                "text/csv",
+            )
+        },
+    )
+    assert upload.status_code == status.HTTP_201_CREATED
+    dataset_id = upload.json()["id"]
+    assert upload.json()["last_analysis"] is None
+
+    analyzed = client.post(
+        f"/api/v1/datasets/{dataset_id}/analyze/leakage",
+        params={"target_column": "target"},
+    )
+    assert analyzed.status_code == status.HTTP_200_OK
+
+    dataset_response = client.get(f"/api/v1/datasets/{dataset_id}")
+    assert dataset_response.status_code == status.HTTP_200_OK
+    dataset = dataset_response.json()
+    assert dataset["status"] == "Analyzed"
+    assert dataset["last_analysis"].endswith("+00:00")
+    assert dataset["class_count"] == 2
+    assert dataset["profile"]["target_column"] == "target"
+    assert dataset["profile"]["target_class_counts"] == {"yes": 2, "no": 1}
+
+
+def test_failed_analysis_preserves_last_successful_timestamp(client, test_db):
+    upload = client.post(
+        "/api/v1/datasets",
+        data={
+            "name": "failed analysis state",
+            "type": "tabular",
+            "format": "CSV",
+            "description": "last successful timestamp must survive",
+        },
+        files={"file": ("data.csv", b"a,b\n1,x\n2,y\n", "text/csv")},
+    )
+    assert upload.status_code == status.HTTP_201_CREATED
+    dataset_id = upload.json()["id"]
+
+    successful = client.post(f"/api/v1/datasets/{dataset_id}/analyze/leakage")
+    assert successful.status_code == status.HTTP_200_OK
+    prior_timestamp = client.get(f"/api/v1/datasets/{dataset_id}").json()["last_analysis"]
+    assert prior_timestamp is not None
+
+    failed = client.post(
+        f"/api/v1/datasets/{dataset_id}/analyze/leakage",
+        params={"target_column": "not_a_real_column"},
+    )
+    assert failed.status_code == status.HTTP_400_BAD_REQUEST
+    after_failure = client.get(f"/api/v1/datasets/{dataset_id}").json()
+    assert after_failure["status"] == "Analysis failed"
+    assert after_failure["last_analysis"] == prior_timestamp
+
 def test_get_dataset_findings(client, test_db):
     # Upload a CSV with an exact duplicate
     csv_content = b"name,age\nAlice,30\nBob,25\nAlice,30\n"
@@ -177,7 +242,6 @@ def test_repeated_analysis_idempotent(client, test_db):
         assert len(findings) == 1
     finally:
         db.close()
-
 
 
 

@@ -358,13 +358,47 @@ def generate_combined_exact_duplicate_repair(
                     value for value in applied_ids if isinstance(value, str)
                 )
 
-    frame_hashes = [
-        hash_row(original_frame.iloc[index])
-        for index in range(len(original_frame))
-    ]
-    rows_by_hash: Dict[str, List[int]] = {}
-    for index, row_hash in enumerate(frame_hashes):
-        rows_by_hash.setdefault(row_hash, []).append(index)
+    # Exact-duplicate evidence records the hash exclusions used by its own
+    # analysis. The dataset's latest analysis configuration is not sufficient:
+    # a finding can remain open after later analysis uses different settings.
+    # For legacy findings without this metadata, use the only historical hint
+    # available in the profile and retain strict hash validation.
+    profile = dataset.profile if isinstance(dataset.profile, dict) else {}
+    analysis_columns = profile.get("analysis_columns")
+    split_column = (
+        analysis_columns.get("split_column")
+        if isinstance(analysis_columns, dict)
+        else profile.get("split_column")
+    )
+    legacy_exclusions = (
+        [
+            column
+            for column in ("id", split_column)
+            if isinstance(column, str) and column in original_frame.columns
+        ]
+        if isinstance(split_column, str) and split_column in original_frame.columns
+        else []
+    )
+    hash_groups_by_exclusions: Dict[
+        Tuple[str, ...], Tuple[List[str], Dict[str, List[int]]]
+    ] = {}
+
+    def hash_groups(excluded_columns: List[str]):
+        exclusion_key = tuple(excluded_columns)
+        if exclusion_key not in hash_groups_by_exclusions:
+            comparison_frame = original_frame.drop(columns=list(exclusion_key))
+            frame_hashes = [
+                hash_row(comparison_frame.iloc[index])
+                for index in range(len(comparison_frame))
+            ]
+            rows_by_hash: Dict[str, List[int]] = {}
+            for index, row_hash in enumerate(frame_hashes):
+                rows_by_hash.setdefault(row_hash, []).append(index)
+            hash_groups_by_exclusions[exclusion_key] = (
+                frame_hashes,
+                rows_by_hash,
+            )
+        return hash_groups_by_exclusions[exclusion_key]
 
     applied_ids: List[str] = []
     skipped_findings: List[Dict[str, str]] = []
@@ -406,6 +440,26 @@ def generate_combined_exact_duplicate_repair(
             })
             continue
 
+        evidence_exclusions = evidence.get("hash_excluded_columns")
+        if evidence_exclusions is None:
+            excluded_columns = legacy_exclusions
+        elif (
+            isinstance(evidence_exclusions, list)
+            and all(
+                isinstance(column, str) and column in original_frame.columns
+                for column in evidence_exclusions
+            )
+            and len(set(evidence_exclusions)) == len(evidence_exclusions)
+        ):
+            excluded_columns = evidence_exclusions
+        else:
+            skipped_findings.append({
+                "finding_id": finding_id,
+                "reason": "Duplicate evidence contains invalid hash-exclusion metadata.",
+            })
+            continue
+
+        frame_hashes, rows_by_hash = hash_groups(excluded_columns)
         actual_group_indices = rows_by_hash.get(evidence_hash, [])
         if (
             len(actual_group_indices) < 2

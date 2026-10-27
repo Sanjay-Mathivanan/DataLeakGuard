@@ -1,9 +1,10 @@
-import React, { useState } from 'react';
-import { Menu, Search, Bell, HelpCircle, Check, Info, Shield, X, LogOut } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { Menu, Search, Bell, HelpCircle, Shield, X, LogOut } from 'lucide-react';
 import { Breadcrumb } from '../common/Breadcrumb';
 import { useAuth } from '../../context/AuthContext';
 import { useNavigate } from 'react-router-dom';
 import { getDatasetWorkflowPath } from '../../services/datasetNavigation';
+import { ApiNotification, getNotifications, markAllNotificationsRead, markNotificationRead } from '../../services/api';
 
 interface NavbarProps {
   onToggleSidebar: () => void;
@@ -16,12 +17,45 @@ export const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [showNotifications, setShowNotifications] = useState(false);
   const [showHelpModal, setShowHelpModal] = useState(false);
+  const [notifications, setNotifications] = useState<ApiNotification[]>([]);
+  const [notificationError, setNotificationError] = useState('');
 
-  const notifications = [
-    { id: 1, title: 'Duplicate leakage identified', time: '12m ago', unread: true },
-    { id: 2, title: 'Model hash mismatch: YOLOv8', time: '2h ago', unread: true },
-    { id: 3, title: 'Inference record PRV-9041 verified', time: '4h ago', unread: false }
-  ];
+  useEffect(() => {
+    if (!showNotifications) return;
+    getNotifications()
+      .then(setNotifications)
+      .catch(() => setNotificationError('Notifications could not be loaded.'));
+  }, [showNotifications]);
+
+  const openNotification = async (item: ApiNotification) => {
+    if (!item.readAt) {
+      try {
+        await markNotificationRead(item.id);
+        setNotifications((current) =>
+          current.map((entry) =>
+            entry.id === item.id ? { ...entry, readAt: new Date().toISOString() } : entry
+          )
+        );
+      } catch {
+        setNotificationError('Could not mark this notification as read.');
+      }
+    }
+    setShowNotifications(false);
+    if (item.findingId && item.datasetId) navigate(`/leakage-analysis/${item.datasetId}`);
+    else if (item.operationId && item.datasetId) navigate(`/repair/${item.datasetId}`);
+    else if (item.datasetId) navigate(`/datasets/${item.datasetId}`);
+  };
+
+  const markAllRead = async () => {
+    try {
+      await markAllNotificationsRead();
+      setNotifications((current) =>
+        current.map((item) => ({ ...item, readAt: item.readAt || new Date().toISOString() }))
+      );
+    } catch {
+      setNotificationError('Could not mark notifications as read.');
+    }
+  };
 
   const quickLinks = [
     { label: 'Browse datasets for analysis and repair', path: getDatasetWorkflowPath('findings') },
@@ -75,24 +109,40 @@ export const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar }) => {
               aria-label="Notifications"
             >
               <Bell className="w-4 h-4" />
-              <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-teal-600" />
+              {notifications.some((item) => !item.readAt) && (
+                <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-teal-600" />
+              )}
             </button>
 
             {showNotifications && (
               <div className="absolute right-0 mt-2 w-80 bg-white border border-slate-200 rounded-xl shadow-xl p-3 z-50 animate-in fade-in duration-150">
                 <div className="flex items-center justify-between pb-2 mb-2 border-b border-slate-100">
                   <span className="text-xs font-semibold text-slate-900">Integrity Alerts</span>
-                  <span className="text-[10px] text-teal-700 font-mono font-medium">2 Unread</span>
+                  <span className="text-[10px] text-teal-700 font-mono font-medium">
+                    {notifications.filter((item) => !item.readAt).length} Unread
+                  </span>
+                  <button onClick={() => void markAllRead()} className="text-[10px] text-slate-500 hover:text-teal-700">
+                    Mark all read
+                  </button>
                 </div>
                 <div className="space-y-1.5">
+                  {notificationError && (
+                    <p role="alert" className="p-2 text-xs text-rose-700">{notificationError}</p>
+                  )}
+                  {!notificationError && notifications.length === 0 && (
+                    <p className="p-2 text-xs text-slate-500">No notifications yet.</p>
+                  )}
                   {notifications.map((n) => (
                     <div
                       key={n.id}
-                      className="p-2 rounded-lg bg-slate-50 hover:bg-teal-50/60 border border-slate-200/60 cursor-pointer transition-colors"
-                      onClick={() => setShowNotifications(false)}
+                      role="button"
+                      tabIndex={0}
+                      className={`p-2 rounded-lg hover:bg-teal-50/60 border border-slate-200/60 cursor-pointer transition-colors ${n.readAt ? 'bg-white' : 'bg-slate-50'}`}
+                      onClick={() => void openNotification(n)}
                     >
                       <p className="text-xs text-slate-800 font-medium">{n.title}</p>
-                      <span className="text-[10px] text-slate-400">{n.time}</span>
+                      <p className="text-[11px] text-slate-600">{n.message}</p>
+                      <span className="text-[10px] text-slate-400">{new Date(n.createdAt).toLocaleString()}</span>
                     </div>
                   ))}
                 </div>
@@ -112,15 +162,14 @@ export const Navbar: React.FC<NavbarProps> = ({ onToggleSidebar }) => {
           {/* User profile quick tag */}
           <div className="hidden md:flex items-center gap-2 pl-2 border-l border-slate-200">
             <div className="w-7 h-7 rounded-full bg-teal-50 border border-teal-200 flex items-center justify-center text-xs font-semibold text-teal-800 font-mono">
-              {user?.name ? user.name.slice(0, 2).toUpperCase() : 'AV'}
+              {user?.name ? user.name.slice(0, 2).toUpperCase() : 'U'}
             </div>
             <span className="text-xs text-slate-700 font-medium max-w-[120px] truncate">
-              {user?.name || 'Dr. Alexis Vance'}
+              {user?.name || user?.email || 'Account'}
             </span>
             <button
               onClick={() => {
-                logout();
-                navigate('/login');
+                void logout().catch(() => undefined).finally(() => navigate('/login'));
               }}
               title="Sign Out"
               className="p-1 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded transition-colors ml-1"
