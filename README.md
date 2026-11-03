@@ -2,7 +2,7 @@
 
 An evidence-oriented dataset integrity and leakage review application for tabular machine-learning data. The implemented analysis and repair workflows support CSV and XLSX datasets; ZIP uploads have a limited image-profiling path, not computer-vision leakage analysis.
 
-> **Project status:** Core dataset, finding, evidence, repair, quarantine, combined-repair, and download paths are present. Several broader dashboard/model/report screens remain mock or frontend-only. This is a final-year project, not a production-ready security product.
+> **Project status:** Core dataset, finding, evidence, repair, quarantine, model-artifact metadata, provenance metadata, distribution comparisons, impact counts, and JSON/HTML report paths are present. This is a final-year project, not a production-ready security product.
 
 ## Contents
 
@@ -56,9 +56,14 @@ The current application is focused on structured CSV/XLSX workflows. It does not
 - Download path containment and stored-output SHA-256 verification.
 - Dataset deletion protection when findings/operations exist; otherwise only the database row is removed and the original file is retained.
 
-### Partial, mock, or not implemented
+### Partial or not implemented
 
-Model integrity, inference provenance, distribution shift, impact analysis, reports, and related screens/API functions include mock or in-memory frontend data. Backend registration, login, session, profile, and workspace APIs are present, but their availability against an existing database depends on the explicit authentication/events migration. Finding-status updates, model retraining, and combined model evaluation are not implemented as backend workflows. Do not treat those features as completed capabilities.
+Model integrity is implemented as owner-scoped artifact registration, storage, and SHA-256 verification; inference provenance stores metadata and explicitly records `no_prediction`; distribution shift stores tabular comparisons; impact metrics store finding/operation counts; and reports are persisted and downloadable as JSON or HTML. Model execution, retraining, behavioral verification, accuracy comparison, PDF generation, and fabricated predictions are not implemented.
+
+The model, provenance, distribution, impact, and report screens now call the
+corresponding backend workflows. Browser coverage is still incomplete; see
+[`DataLeakGuard-CV_E2E_TEST_REPORT.md`](DataLeakGuard-CV_E2E_TEST_REPORT.md) for
+the verified and unverified scenarios.
 
 ## Technology stack
 
@@ -92,7 +97,7 @@ flowchart LR
   Download --> Quarantine
 ```
 
-The backend separates route handling (`backend/app/api/v1`) from data processing/services and storage utilities. The frontend pages use `src/services/api.ts`; some less-complete product areas still use local mock data. CORS is configured in `backend/app/core/config.py`; the Vite development server uses port 3000, and the backend is commonly run on port 8000.
+The backend separates route handling (`backend/app/api/v1`) from data processing/services and storage utilities. The frontend pages use `src/services/api.ts`; legacy simulator helpers remain in the service module but are not used for the implemented persisted workflows. CORS is configured in `backend/app/core/config.py`; the Vite development server uses port 3000, and the backend is commonly run on port 8000.
 
 ## Project structure
 
@@ -116,7 +121,7 @@ The backend separates route handling (`backend/app/api/v1`) from data processing
 │   ├── context/                # Frontend contexts, including auth UI state
 │   ├── data/                   # Mock data for incomplete areas
 │   ├── pages/                  # Analysis, datasets, leakage, repair, etc.
-│   ├── services/api.ts         # Backend API and remaining mock functions
+│   ├── services/api.ts         # Backend API and legacy simulator helpers
 │   └── types/                  # Frontend domain types
 ├── package.json
 ├── vite.config.ts
@@ -137,7 +142,7 @@ The phase names below reflect the project context and the current source. Histor
 | **4 — Evidence Architecture** | Preserve structured detector evidence and expose finding evidence with source metadata. | `services/evidence_service.py`, evidence schemas, `api/v1/findings.py`; `GET /api/v1/findings/{id}/evidence` | Implemented. Evidence detail varies by detector; temporal findings do not provide deterministic row indices for automated row selection. |
 | **5 — Repair, Quarantine, History** | Create separate repaired copies or quarantine subsets, persist operation records, expose history and secure output download. | `services/repair_service.py`, `quarantine_service.py`, `RepairRecord`; repair/quarantine/history/download routes | Implemented for supported operations. Originals are read, not rewritten. Quarantine is an output containing affected rows, not deletion from the original. |
 | **Combined Repair** | Apply explicitly selected exact-duplicate findings to one working copy, create one consolidated cleaned output and record provenance. | `generate_combined_exact_duplicate_repair`; `POST /api/v1/datasets/{id}/repairs/combined` | Implemented for CSV/XLSX exact duplicates. No general repair for other detector types. |
-| **Frontend integration work** | Connect analysis, persisted findings/evidence and repair operations to the UI; show truthful stage and operation states. | `AnalysisPage.tsx`, `LeakageAnalysisPage.tsx`, `RepairPage.tsx`, `api.ts` | Core workflows are connected. Other dashboard/model/report areas remain mock or partial. |
+| **Frontend integration work** | Connect analysis, persisted findings/evidence and repair operations to the UI; show truthful stage and operation states. | `AnalysisPage.tsx`, `LeakageAnalysisPage.tsx`, `RepairPage.tsx`, `api.ts` | Core workflows and the scoped artifact/provenance/distribution/impact/report screens are API-backed; fresh browser coverage remains incomplete. |
 
 ## Leakage analysis and evidence
 
@@ -197,6 +202,21 @@ Before migrating a database: stop the backend gracefully, make a uniquely named 
 
 The API prefix defaults to `/api/v1`. Swagger UI is available at `http://127.0.0.1:8000/docs` when the backend is running.
 
+### Persisted workflow endpoints
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| POST/GET | `/model-artifacts` | Register or list owned model artifacts |
+| GET | `/model-artifacts/{id}/verify` | Recompute and compare the artifact SHA-256 |
+| GET | `/model-artifacts/{id}/download` | Download an owned artifact |
+| POST/GET | `/provenance` | Store or list metadata-only provenance records |
+| POST/GET | `/distribution-comparisons` | Compare and list owned tabular dataset distributions |
+| POST/GET | `/impact-metrics` | Persist or retrieve finding/operation impact counts |
+| POST/GET/DELETE | `/reports` | Create, list, or delete persisted reports |
+| GET | `/reports/{id}/download?format=json\|html` | Download the persisted report payload |
+
+These endpoints require the existing authenticated session and CSRF protections. They do not execute models or claim model-performance improvements.
+
 | Method and path | Purpose |
 |---|---|
 | `GET /api/v1/health` | Basic health response. |
@@ -241,7 +261,7 @@ python -m venv .venv
 python -m pip install -r requirements.txt
 ```
 
-The backend reads settings through `pydantic-settings`. `backend/.env.example` lists non-secret settings including `API_V1_STR`, `PROJECT_NAME`, `DATABASE_URL`, and `BACKEND_CORS_ORIGINS`. The backend also supports `MAX_UPLOAD_SIZE_MB`, which defaults to 100 MB in code. The frontend API client reads `VITE_API_BASE_URL` and defaults to the relative path `/api/v1`. When running frontend and backend on separate local origins, configure it in a local environment file, for example:
+The backend reads settings through `pydantic-settings`. `backend/.env.example` lists non-secret settings including `API_V1_STR`, `PROJECT_NAME`, `DATABASE_URL`, and `BACKEND_CORS_ORIGINS`. The backend also supports `MAX_UPLOAD_SIZE_MB`, which defaults to 100 MB in code. The frontend API client reads `VITE_API_BASE_URL` and defaults to the relative path `/api/v1`. When running frontend and backend on separate local origins, use one canonical host consistently. The repository's local configuration uses `127.0.0.1` for both services:
 
 ```text
 VITE_API_BASE_URL=http://127.0.0.1:8000/api/v1
@@ -265,7 +285,7 @@ cd C:\Users\sanja\my_project\dataleakguard-cv
 npm run dev
 ```
 
-Open the Vite app at `http://localhost:3000` and API documentation at `http://127.0.0.1:8000/docs`.
+Open the Vite app at `http://127.0.0.1:3000` and API documentation at `http://127.0.0.1:8000/docs`. Do not mix `localhost` and `127.0.0.1` during local authenticated testing because host-only cookies are not interchangeable.
 
 Typical workflow:
 
@@ -333,7 +353,7 @@ AUTH_RATE_LIMIT_STORAGE_URI=<shared-limits-compatible-uri>
 - Quarantine is available only where evidence yields deterministic row positions. Temporal and target findings are not automatically row-quarantined.
 - Combined repair supports exact duplicates only. Keep a copy of the original and review the applied/skipped findings and final output.
 - There is no confirmed browser-based end-to-end suite in the current test inventory. API/service tests do not alone establish deployment behavior.
-- Broader model-integrity, inference, shift, impact, reporting, and auth screens include mock or partial behavior; avoid presenting them as completed backend workflows.
+- Model execution, signature verification, behavioral model checks, PDF reports, and full browser coverage remain incomplete; avoid presenting them as implemented capabilities.
 
 ### Practical future improvements
 
@@ -342,7 +362,7 @@ AUTH_RATE_LIMIT_STORAGE_URI=<shared-limits-compatible-uri>
 3. Add browser-level integration tests covering registration/login, ownership isolation, upload through evidence, repair, and download.
 4. Improve detector explainability, calibration, configuration validation and false-positive evaluation on representative datasets.
 5. Define retention/cleanup rules with reference checks, audit logs, and explicit user consent.
-6. Replace remaining mock dashboard/model/report behavior only when the corresponding backend capability is implemented and tested.
+6. Complete the remaining browser matrix and remove legacy simulator-only UI sections where corresponding backend capabilities do not exist.
 
 ## Troubleshooting
 
@@ -357,3 +377,117 @@ AUTH_RATE_LIMIT_STORAGE_URI=<shared-limits-compatible-uri>
 The repository contains backend and frontend integration for tabular upload/profiling, persisted leakage findings/evidence, supported repair/quarantine operations, combined exact-duplicate cleaning, operation history, output downloads, and authentication/workspace APIs. The repair metadata migration is present and the configured database was previously observed to have its nullable `operation_metadata` column; its historical origin is unknown. The separate authentication/events migration remains explicit and has not been applied to the configured project database.
 
 The project remains an academic prototype. Broader ML/CV assurance features, production verification of the authentication/ownership schema, shared multi-worker rate limiting, deployment-edge configuration, a formal retention policy, and complete browser-level verification remain outstanding or partial. Passing isolated tests alone would not establish production readiness.
+
+## Batch 1 implementation update (2026-11-02)
+
+Batch 1 Phases 1–4 are implemented in the current checkout:
+
+- **Findings:** backend pagination/search/type/severity/status filters and
+  summaries are available at
+  `GET /api/v1/datasets/{dataset_id}/findings/page`. The existing
+  `GET /findings` array contract remains.
+- **Audit History:** dataset activity timeline data is available at
+  `GET /api/v1/datasets/{dataset_id}/history/page` with pagination and
+  type/status/date/search filters.
+- **Feature Profiles:** search, type/missing/cardinality filters, sorting,
+  derived summary values, and expandable stored categorical frequencies use
+  the existing profile metadata.
+- **Detector configuration:** authenticated
+  `GET /api/v1/datasets/{dataset_id}/column-recommendations` provides
+  heuristic target/entity/split/timestamp candidates. Results are advisory,
+  metadata-based, and never auto-selected. Users must review/confirm before
+  submitting analysis.
+
+No schema migration or database change was made. Final isolated tests:
+backend **245 passed, 1 skipped**; frontend **61 passed**; TypeScript/lint and
+production build passed. Build warnings: Node 20.13.1 is below the current Vite
+minimum, existing Vite `__dirname` config-loader warning, and an advisory
+oversized JS chunk. Browser interaction of the new controls remains NOT
+VERIFIED. Phases 5–8 were not part of Batch 1.
+
+## Batch 2 update — Phases 5–8 (2026-11-03)
+
+Batch 2 extends the current implementation with:
+
+- Existing, generated-copy, and no-split analysis strategies. Generated
+  splits use a deterministic seed and separate output; the source dataset is
+  not overwritten. No-split results disclose split-dependent checks as
+  skipped.
+- An integrated analysis workspace with selected split/configuration,
+  detector/run status, current-run grouped findings, and links to persisted
+  findings and history.
+- Combined exact-duplicate cleaning with a read-only preview, explicit
+  confirmation, stale-preview rejection, separate output, and persisted
+  operation/evidence metadata.
+- Verified exact-duplicate “keep first” repair only. Other finding types
+  remain unsupported for automatic repair; no values or repair results are
+  fabricated.
+
+Batch 2 reuses existing operation and audit metadata; it added/applied no
+database migration. Compatibility is preserved for older analysis API
+clients, while explicit existing-split configuration still rejects missing
+membership.
+
+Fresh regression: backend **256 passed, 1 skipped** in a disposable copy;
+frontend **74 passed**; TypeScript/lint passed; production build passed.
+Build advisories include Node v20.13.1 below Vite's stated minimum,
+`__dirname` config-loader compatibility, and an oversized JS chunk. The
+initial backend run exposed seven legacy split-route failures; after a
+backward-compatibility fix the complete suite passed. See
+`DataLeakGuard-CV_E2E_TEST_REPORT.md` for commands and evidence.
+
+Batch 2 browser workflows are NOT VERIFIED. Passing automated tests do not
+establish the live analysis, confirmation-dialog, or history experience.
+Phases 5–8 are functionally covered by implementation and automated
+regression, but the project is not declared production-ready. Preserve all
+existing data; do not rerun migrations or tests against the project database.
+
+## Browser-verification maintenance — 2026-11-03
+
+Repair/quarantine operation history now tolerates older metadata without
+`skipped_findings`; missing historical values are shown as unavailable rather
+than blocking the page. Column recommendations remain advisory and now rank
+readmission outcome names for matching datasets while warning on likely
+copied/derived/post-outcome names. Combined-cleaning preview displays bounded
+source row positions and allows cancellation before explicit confirmation.
+No schema/migration change was made.
+
+Fresh disposable verification: backend **263 passed, 1 skipped**; frontend
+**78 passed**; TypeScript/lint and production build passed. No browser E2E was
+run: browser automation dependencies and the named 6,224-row synthetic CSV
+were unavailable in this workspace. See
+`DataLeakGuard-CV_E2E_TEST_REPORT.md` for exact commands and remaining
+NOT VERIFIED workflows.
+
+## Remediation Center and Analysis Setup — 2026-11-03
+
+The dataset workflow now includes a separate **Analysis Setup** route and a
+detector-grouped **Remediation Center**. Open these from a dataset detail page:
+
+- Analysis Setup: select a target, entity, time, and split configuration.
+  Recommendations are advisory; select a recommendation or manual column
+  explicitly, review the exact configuration, and confirm it before
+  continuing. Analysis remains a separate user action.
+- Analysis: shows the confirmed configuration, detector response states,
+  current-run findings and links to persisted findings/history.
+- Remediation Center: `/remediation/{dataset_id}`. The compatible
+  `/repair/{dataset_id}` route also opens this center. Findings are server
+  paginated (10 rows per page by default), grouped into the five supported
+  detector types, and searchable/filterable. Preview is read-only; execution
+  requires explicit confirmation and writes separate output artifacts.
+
+Supported remediation remains evidence-dependent: duplicate keep-first;
+entity group-aware split rebuilding or row-evidence quarantine; target feature
+exclusion while retaining the target; chronological split rebuilding with an
+explicit cutoff; train/test contamination handling only after an explicit
+retained-partition choice or quarantine. Unsupported evidence is review-only.
+The original upload is never overwritten and unresolved findings are not
+reported as repaired.
+
+The final automated regression on 2026-11-03 was backend **277 passed,
+1 skipped**, frontend **86 passed**, TypeScript/lint passed, Python compilation
+passed, and Vite production build passed. The build still reports the local
+Node/Vite version advisory, config-loader `__dirname` advisory, and a large
+JavaScript chunk. **Authenticated browser E2E remains NOT VERIFIED**; automated
+tests are not proof of live navigation or download events. Follow the manual
+checklist in `DataLeakGuard-CV_E2E_TEST_REPORT.md` using a disposable dataset.

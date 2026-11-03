@@ -13,7 +13,7 @@ import {
   Search
 } from 'lucide-react';
 import { AssuranceReport } from '../types';
-import { getReports, deleteReport, generateAssuranceReport } from '../services/api';
+import { getDatasets, getReports, deleteReport, downloadReport, generateAssuranceReport } from '../services/api';
 import { StatusBadge } from '../components/common/StatusBadge';
 import { ConfirmModal } from '../components/common/ConfirmModal';
 import { TableSkeleton } from '../components/common/LoadingSkeleton';
@@ -25,14 +25,18 @@ export const ReportsPage: React.FC = () => {
 
   const [reports, setReports] = useState<AssuranceReport[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
   const [search, setSearch] = useState('');
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
 
   const fetchReports = async () => {
+    setLoadError('');
     try {
       const data = await getReports();
       setReports(data);
+    } catch (fetchError) {
+      setLoadError(fetchError instanceof Error ? fetchError.message : 'Could not load persisted reports.');
     } finally {
       setLoading(false);
     }
@@ -45,8 +49,10 @@ export const ReportsPage: React.FC = () => {
   const handleGenerate = async () => {
     setIsGenerating(true);
     try {
-      const created = await generateAssuranceReport('ds-adult-income', 'mdl-xgboost-census');
-      success('Report Compiled', `Generated assurance report ${created.id}.`);
+      const datasets = await getDatasets();
+      if (datasets.length === 0) throw new Error('Upload a dataset before generating a report.');
+      const created = await generateAssuranceReport(datasets[0].id, '');
+      success('Report Generated', `Persisted dataset snapshot ${created.id}.`);
       await fetchReports();
       navigate(`/reports/${created.id}`);
     } catch {
@@ -68,11 +74,13 @@ export const ReportsPage: React.FC = () => {
     }
   };
 
-  const handleDownloadPDF = (reportId: string, title: string) => {
-    info('Exporting Document', `Compiling ${title} to PDF...`);
-    setTimeout(() => {
-      success('PDF Ready', `Downloaded ${reportId}-assurance-audit.pdf`);
-    }, 800);
+  const handleDownloadReport = async (reportId: string, title: string) => {
+    try {
+      await downloadReport(reportId, 'html');
+      success('Report Downloaded', `${title} was downloaded as HTML.`);
+    } catch {
+      error('Download Error', 'Could not download the persisted report.');
+    }
   };
 
   const filteredReports = reports.filter(
@@ -89,13 +97,13 @@ export const ReportsPage: React.FC = () => {
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <span className="text-xs font-mono text-teal-700 uppercase tracking-wider font-semibold">
-            Evidence Documentation
+            Persisted Records
           </span>
           <h1 className="text-2xl font-bold tracking-tight text-slate-900 font-mono mt-1">
-            Assurance Reports
+            Dataset Integrity Reports
           </h1>
           <p className="text-xs text-slate-500 mt-1">
-            Archived formal integrity assurance reports documenting leakage findings, risk assessments, and dispositions.
+            Persisted dataset identifiers, file hashes, and impact counts. Model evaluation, risk scores, and assurance dispositions are not generated.
           </p>
         </div>
 
@@ -124,7 +132,9 @@ export const ReportsPage: React.FC = () => {
       </div>
 
       {/* Reports Table */}
-      {loading ? (
+      {loadError ? (
+        <div role="alert" className="rounded-xl border border-rose-200 bg-rose-50 p-5 text-sm text-rose-800">{loadError}</div>
+      ) : loading ? (
         <TableSkeleton rows={3} />
       ) : (
         <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-xs">
@@ -136,13 +146,19 @@ export const ReportsPage: React.FC = () => {
                   <th className="px-5 py-3 font-semibold">Audit Title</th>
                   <th className="px-5 py-3 font-semibold">Dataset & Model</th>
                   <th className="px-5 py-3 font-semibold">Created Date</th>
-                  <th className="px-5 py-3 font-semibold">Disposition</th>
+                  <th className="px-5 py-3 font-semibold">Assessment</th>
                   <th className="px-5 py-3 font-semibold">Confidence</th>
                   <th className="px-5 py-3 font-semibold text-right">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {filteredReports.map((rep) => (
+                {filteredReports.length === 0 ? (
+                  <tr>
+                    <td colSpan={7} className="px-5 py-8 text-center text-slate-500">
+                      {reports.length === 0 ? 'No persisted reports yet. Generate a snapshot from an owned dataset.' : 'No reports match this search.'}
+                    </td>
+                  </tr>
+                ) : filteredReports.map((rep) => (
                   <tr key={rep.id} className="hover:bg-slate-50/80 transition-colors">
                     <td className="px-5 py-3 font-mono font-semibold text-teal-800 whitespace-nowrap">
                       {rep.id}
@@ -171,7 +187,7 @@ export const ReportsPage: React.FC = () => {
                     </td>
 
                     <td className="px-5 py-3 font-mono tabular-nums text-slate-900 font-semibold whitespace-nowrap">
-                      {rep.confidenceScore}%
+                      {rep.confidenceScore == null ? 'Not assessed' : `${rep.confidenceScore}%`}
                     </td>
 
                     <td className="px-5 py-3 text-right whitespace-nowrap">
@@ -184,9 +200,9 @@ export const ReportsPage: React.FC = () => {
                           <Eye className="w-3.5 h-3.5" />
                         </button>
                         <button
-                          onClick={() => handleDownloadPDF(rep.id, rep.title)}
+                          onClick={() => handleDownloadReport(rep.id, rep.title)}
                           className="p-1.5 text-slate-400 hover:text-emerald-600 hover:bg-slate-100 rounded transition-colors"
-                          title="Download PDF"
+                          title="Download HTML report"
                         >
                           <Download className="w-3.5 h-3.5" />
                         </button>
@@ -211,7 +227,7 @@ export const ReportsPage: React.FC = () => {
       <ConfirmModal
         isOpen={!!deleteId}
         title="Delete Assurance Report"
-        message="Are you sure you want to permanently delete this assurance document? The cryptographic audit trail within will be permanently removed from this workspace."
+        message="Are you sure you want to permanently delete this persisted report snapshot?"
         confirmLabel="Delete Report"
         isDestructive
         onConfirm={handleDelete}

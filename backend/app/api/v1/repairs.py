@@ -1,6 +1,7 @@
 import hmac
 import logging
 import re
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import FileResponse
@@ -13,6 +14,11 @@ from app.services.activity_service import record_user_event
 from app.services.repair_service import (
     generate_combined_exact_duplicate_repair,
     repair_exact_duplicates,
+)
+from app.services.remediation_service import _response_for_plan
+from app.utils.operation_metadata import (
+    normalize_operation_metadata,
+    normalize_operation_response,
 )
 from app.utils.file_storage import (
     PROCESSED_DIR,
@@ -33,8 +39,13 @@ _OUTPUT_MEDIA_TYPES = {
 }
 
 
-class CombinedRepairRequest(BaseModel):
+class CombinedRepairPreviewRequest(BaseModel):
     selected_finding_ids: list[str] = Field(min_length=1)
+
+
+class CombinedRepairRequest(CombinedRepairPreviewRequest):
+    preview_token: Optional[str] = None
+    confirmed: bool = False
 
 
 @router.post("/findings/{finding_id}/repair", status_code=status.HTTP_201_CREATED)
@@ -61,10 +72,12 @@ def repair_finding(
 
     # Call the repair service
     try:
-        result = repair_exact_duplicates(
-            dataset_id=finding.dataset_id,
-            finding_id=finding_id,
-            db=db
+        result = normalize_operation_response(
+            repair_exact_duplicates(
+                dataset_id=finding.dataset_id,
+                finding_id=finding_id,
+                db=db
+            )
         )
     except Exception:
         record_user_event(
@@ -124,10 +137,12 @@ def repair_dataset(
     # Process each finding
     repair_results = []
     for finding in findings:
-        result = repair_exact_duplicates(
-            dataset_id=dataset_id,
-            finding_id=finding.id,
-            db=db
+        result = normalize_operation_response(
+            repair_exact_duplicates(
+                dataset_id=dataset_id,
+                finding_id=finding.id,
+                db=db
+            )
         )
         repair_results.append(result)
         operation_id = result.get("repair_id") or result.get("id")
@@ -148,6 +163,30 @@ def repair_dataset(
 
 
 @router.post(
+    "/datasets/{dataset_id}/repairs/combined/preview",
+)
+def preview_dataset_combined_repair(
+    dataset_id: str,
+    request: CombinedRepairPreviewRequest,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
+    """Preview selected exact-duplicate cleaning without writing an output."""
+    dataset = db.query(models.Dataset).filter(
+        models.Dataset.id == dataset_id,
+        models.Dataset.owner_user_id == user.id,
+    ).first()
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    return generate_combined_exact_duplicate_repair(
+        dataset_id=dataset_id,
+        selected_finding_ids=request.selected_finding_ids,
+        db=db,
+        preview_only=True,
+    )
+
+
+@router.post(
     "/datasets/{dataset_id}/repairs/combined",
     status_code=status.HTTP_201_CREATED,
 )
@@ -164,11 +203,22 @@ def repair_dataset_combined(
     ).first()
     if dataset is None:
         raise HTTPException(status_code=404, detail="Dataset not found")
+    if request.confirmed is not True:
+        raise HTTPException(
+            status_code=status.HTTP_428_PRECONDITION_REQUIRED,
+            detail="Explicit confirmation is required before generating combined cleaned output",
+        )
+    if not request.preview_token:
+        raise HTTPException(
+            status_code=status.HTTP_428_PRECONDITION_REQUIRED,
+            detail="A current combined-cleaning preview token is required",
+        )
     try:
         result = generate_combined_exact_duplicate_repair(
             dataset_id=dataset_id,
             selected_finding_ids=request.selected_finding_ids,
             db=db,
+            expected_preview_token=request.preview_token,
         )
     except Exception:
         record_user_event(
@@ -193,13 +243,28 @@ def repair_dataset_combined(
         title="Combined repair completed",
         message="A cleaned dataset was generated from selected duplicate findings.",
         details={
+            "selected_finding_ids": (result.get("operation_metadata") or {}).get(
+                "selected_finding_ids", []
+            ),
             "applied_finding_ids": (result.get("operation_metadata") or {}).get("applied_finding_ids", []),
             "skipped_findings": (result.get("operation_metadata") or {}).get("skipped_findings", []),
             "duplicate_rows_removed": result.get("affected_rows"),
+            "affected_row_indices_preview": (
+                result.get("operation_metadata") or {}
+            ).get("affected_row_indices_preview", []),
+            "affected_row_indices_count": (
+                result.get("operation_metadata") or {}
+            ).get("affected_row_indices_count", 0),
+            "affected_row_indices_sha256": (
+                result.get("operation_metadata") or {}
+            ).get("affected_row_indices_sha256"),
+            "evidence_reference_finding_ids": (
+                result.get("operation_metadata") or {}
+            ).get("evidence_reference_finding_ids", []),
         },
         deduplication_key=f"combined-repair:{operation_id}" if operation_id else None,
     )
-    return result
+    return normalize_operation_response(result)
 
 
 @router.get("/repairs/{repair_id}")
@@ -226,7 +291,13 @@ def get_repair(
     ).first()
 
     # Convert repair record to the expected format (matching test expectations)
-    operation_metadata = repair_record.operation_metadata
+    stored_operation_metadata = repair_record.operation_metadata
+    operation_metadata = (
+        _response_for_plan(repair_record)["plan"]
+        if repair_record.operation_type
+        in {"remediation_plan", "consolidated_remediation"}
+        else normalize_operation_metadata(stored_operation_metadata)
+    )
     return {
         "id": str(repair_record.id),
         "dataset_id": repair_record.dataset_id,
@@ -239,13 +310,13 @@ def get_repair(
         "output_filename": repair_record.output_filename,
         "output_file_sha256": repair_record.output_file_sha256,
         "original_row_count": (
-            operation_metadata.get("original_row_count")
-            if isinstance(operation_metadata, dict)
+            stored_operation_metadata.get("original_row_count")
+            if isinstance(stored_operation_metadata, dict)
             else getattr(repair_record, 'original_row_count', 0)
         ),
         "processed_row_count": (
-            operation_metadata.get("final_row_count")
-            if isinstance(operation_metadata, dict)
+            stored_operation_metadata.get("final_row_count")
+            if isinstance(stored_operation_metadata, dict)
             else getattr(repair_record, 'processed_row_count', 0)
         ),
         "affected_rows": getattr(repair_record, 'affected_rows', 0),
@@ -282,7 +353,13 @@ def get_dataset_repairs(
     # Convert to expected format (matching test expectations)
     repair_results = []
     for record in repair_records:
-        operation_metadata = record.operation_metadata
+        stored_operation_metadata = record.operation_metadata
+        operation_metadata = (
+            _response_for_plan(record)["plan"]
+            if record.operation_type
+            in {"remediation_plan", "consolidated_remediation"}
+            else normalize_operation_metadata(stored_operation_metadata)
+        )
         repair_results.append({
             "id": str(record.id),
             "dataset_id": record.dataset_id,
@@ -295,13 +372,13 @@ def get_dataset_repairs(
             "output_filename": record.output_filename,
             "output_file_sha256": record.output_file_sha256,
             "original_row_count": (
-                operation_metadata.get("original_row_count")
-                if isinstance(operation_metadata, dict)
+                stored_operation_metadata.get("original_row_count")
+                if isinstance(stored_operation_metadata, dict)
                 else getattr(record, 'original_row_count', 0)
             ),
             "processed_row_count": (
-                operation_metadata.get("final_row_count")
-                if isinstance(operation_metadata, dict)
+                stored_operation_metadata.get("final_row_count")
+                if isinstance(stored_operation_metadata, dict)
                 else getattr(record, 'processed_row_count', 0)
             ),
             "affected_rows": getattr(record, 'affected_rows', 0),
@@ -341,6 +418,7 @@ def download_operation_output(
     output_directories = {
         "repair": PROCESSED_DIR,
         "combined_repair": PROCESSED_DIR,
+        "consolidated_remediation": PROCESSED_DIR,
         "quarantine": QUARANTINE_DIR,
     }
     output_directory = output_directories.get(operation.operation_type)
@@ -427,5 +505,9 @@ def download_operation_output(
     return FileResponse(
         path=output_path,
         media_type=media_type,
-        filename=filename,
+        filename=(
+            "DataLeakGuard_Final_Cleaned_Dataset.csv"
+            if operation.operation_type == "consolidated_remediation"
+            else filename
+        ),
     )

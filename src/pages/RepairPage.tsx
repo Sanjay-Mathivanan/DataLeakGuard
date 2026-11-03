@@ -4,6 +4,7 @@ import { Clock3, Download, FileCheck2, LoaderCircle, ShieldAlert, Wrench } from 
 import { SeverityBadge } from '../components/common/SeverityBadge';
 import {
   generateCombinedCleanedDataset,
+  previewCombinedCleanedDataset,
   getDatasetOperationHistory,
   getFindingTypeLabel,
   getFindings,
@@ -15,6 +16,7 @@ import type { OperationOutputDownload } from '../services/api';
 import {
   DatasetOperationRecord,
   FindingOperationType,
+  CombinedRepairPreview,
   PersistedFinding,
 } from '../types';
 
@@ -41,7 +43,8 @@ export function getSupportedFindingOperations(
       rowIndices.length > 1 &&
       typeof duplicateCount === 'number' &&
       Number.isInteger(duplicateCount) &&
-      duplicateCount > 0
+      duplicateCount === rowIndices.length &&
+      new Set(rowIndices).size === rowIndices.length
     ) {
       operations.unshift('repair');
     }
@@ -71,6 +74,48 @@ export function getSupportedFindingOperations(
     return ['quarantine'];
   }
   return [];
+}
+
+export function getRepairEligibility(
+  finding: PersistedFinding,
+  datasetId: string | null | undefined
+): { eligible: boolean; explanation: string; duplicateRowsToRemove?: number } {
+  if (!datasetId?.trim()) {
+    return { eligible: false, explanation: 'A persisted dataset identifier is required.' };
+  }
+  if (finding.datasetId !== datasetId) {
+    return { eligible: false, explanation: 'The finding does not belong to the selected dataset.' };
+  }
+  if (finding.findingType !== 'exact_duplicate') {
+    return {
+      eligible: false,
+      explanation: `No deterministic automatic repair strategy is supported for ${getFindingTypeLabel(finding.findingType)} findings.`,
+    };
+  }
+  const rowIndices = finding.evidence?.row_indices;
+  const duplicateCount = finding.evidence?.duplicate_count;
+  if (
+    !Array.isArray(rowIndices) ||
+    rowIndices.length < 2 ||
+    !rowIndices.every(
+      (index) => typeof index === 'number' && Number.isInteger(index) && index >= 0
+    ) ||
+    new Set(rowIndices).size !== rowIndices.length ||
+    typeof duplicateCount !== 'number' ||
+    !Number.isInteger(duplicateCount) ||
+    duplicateCount !== rowIndices.length
+  ) {
+    return {
+      eligible: false,
+      explanation: 'Current exact-duplicate evidence does not contain a consistent group of row indices.',
+    };
+  }
+  return {
+    eligible: true,
+    duplicateRowsToRemove: duplicateCount - 1,
+    explanation:
+      'Deterministic keep-first repair: remove the later rows in this evidenced duplicate group from a separate output. The backend revalidates the source and evidence before writing; the uploaded original is not modified.',
+  };
 }
 
 function operationKey(findingId: string, operationType: FindingOperationType): string {
@@ -124,7 +169,7 @@ export function getEligibleCombinedRepairFindings(
       operation.status.trim().toLowerCase() === 'completed' &&
       operation.operationType === 'combined_repair'
     ) {
-      operation.operationMetadata?.appliedFindingIds.forEach((findingId) =>
+      operation.operationMetadata?.appliedFindingIds?.forEach((findingId) =>
         alreadyRepaired.add(findingId)
       );
     }
@@ -197,10 +242,15 @@ interface RepairPageViewProps {
   selectedCombinedFindingIds: string[];
   combinedRepairLoading: boolean;
   combinedRepairError: string | null;
+  combinedRepairPreview: CombinedRepairPreview | null;
+  combinedRepairConfirmed: boolean;
   onRunOperation: (finding: PersistedFinding, operationType: FindingOperationType) => void;
   onDownloadOperation: (operation: DatasetOperationRecord) => void;
   onToggleCombinedFinding: (findingId: string) => void;
-  onGenerateCombinedRepair: () => void;
+  onPreviewCombinedRepair: () => void;
+  onCancelCombinedRepairPreview: () => void;
+  onCombinedRepairConfirmedChange: (confirmed: boolean) => void;
+  onConfirmCombinedRepair: () => void;
   onRetry: () => void;
 }
 
@@ -218,10 +268,15 @@ export const RepairPageView: React.FC<RepairPageViewProps> = ({
   selectedCombinedFindingIds,
   combinedRepairLoading,
   combinedRepairError,
+  combinedRepairPreview,
+  combinedRepairConfirmed,
   onRunOperation,
   onDownloadOperation,
   onToggleCombinedFinding,
-  onGenerateCombinedRepair,
+  onPreviewCombinedRepair,
+  onCancelCombinedRepairPreview,
+  onCombinedRepairConfirmedChange,
+  onConfirmCombinedRepair,
   onRetry,
 }) => {
   const completedHistory = history.filter(
@@ -344,20 +399,113 @@ export const RepairPageView: React.FC<RepairPageViewProps> = ({
                 {validateCombinedRepairSelection(selectedCombinedFindingIds)}
               </p>
             )}
-            {combinedRepairError && (
-              <p role="alert" className="text-xs text-rose-700">{combinedRepairError}</p>
+              {combinedRepairError && (
+                <p role="alert" className="text-xs text-rose-700">{combinedRepairError}</p>
+              )}
+            {combinedRepairPreview && (
+              <div className="space-y-3 rounded-lg border border-blue-200 bg-blue-50 p-4 text-xs text-blue-950" data-testid="combined-preview">
+                <p className="font-semibold">Server-computed preview</p>
+                <p>{combinedRepairPreview.explanation}</p>
+                <p>
+                  Original rows: <strong>{combinedRepairPreview.originalRowCount}</strong> ·
+                  {' '}expected final rows: <strong>{combinedRepairPreview.finalRowCount}</strong> ·
+                  {' '}rows removed: <strong>{combinedRepairPreview.duplicateRowsRemoved}</strong>
+                </p>
+                {combinedRepairPreview.affectedRowIndicesCount !== undefined && (
+                  <div className="rounded border border-blue-200 bg-white p-3">
+                    <p className="font-semibold">
+                      Source records to omit from the separate output (0-based row positions)
+                    </p>
+                    {combinedRepairPreview.affectedRowIndicesCount === 0 ? (
+                      <p className="mt-1">No source records are eligible for removal.</p>
+                    ) : (
+                      <>
+                        <p className="mt-1 break-all font-mono">
+                          {combinedRepairPreview.affectedRowIndicesPreview?.join(', ') || 'Row references unavailable'}
+                        </p>
+                        {combinedRepairPreview.affectedRowIndicesTruncated && (
+                          <p className="mt-1">
+                            Showing the first {combinedRepairPreview.affectedRowIndicesPreview?.length ?? 0} of{' '}
+                            {combinedRepairPreview.affectedRowIndicesCount} affected row positions.
+                          </p>
+                        )}
+                        {combinedRepairPreview.affectedRowIndicesSha256 && (
+                          <p className="mt-1 break-all">
+                            SHA-256 of the complete sorted row-position list:{' '}
+                            <code>{combinedRepairPreview.affectedRowIndicesSha256}</code>
+                          </p>
+                        )}
+                      </>
+                    )}
+                  </div>
+                )}
+                <p className="break-all">
+                  Eligible findings: {combinedRepairPreview.appliedFindingIds.length
+                    ? combinedRepairPreview.appliedFindingIds.join(', ')
+                    : 'None'}
+                </p>
+                {combinedRepairPreview.skippedFindings.length > 0 && (
+                  <div>
+                    <p className="font-semibold">Excluded from this operation:</p>
+                    <ul className="list-disc pl-5">
+                      {combinedRepairPreview.skippedFindings.map((item) => (
+                        <li key={item.findingId} className="break-all">{item.findingId}: {item.reason}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {combinedRepairPreview.status === 'preview' && combinedRepairPreview.previewToken && (
+                  <>
+                    <label className="flex items-start gap-2 rounded border border-blue-200 bg-white p-3">
+                      <input
+                        type="checkbox"
+                        checked={combinedRepairConfirmed}
+                        onChange={(event) => onCombinedRepairConfirmedChange(event.target.checked)}
+                        disabled={combinedRepairLoading}
+                        className="mt-0.5"
+                      />
+                      <span>
+                        I reviewed this exact preview and explicitly confirm creating a separate cleaned output.
+                        The uploaded original will not be modified.
+                      </span>
+                    </label>
+                    <button
+                      type="button"
+                      disabled={combinedRepairLoading || !combinedRepairConfirmed}
+                      onClick={onConfirmCombinedRepair}
+                      className="inline-flex items-center gap-2 rounded-lg bg-teal-700 px-3 py-2 text-xs font-semibold text-white hover:bg-teal-800 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {combinedRepairLoading && <LoaderCircle className="h-3.5 w-3.5 animate-spin" />}
+                      {combinedRepairLoading ? 'Generating confirmed output…' : 'Confirm and Generate Cleaned Dataset'}
+                    </button>
+                  </>
+                )}
+                {combinedRepairPreview.status === 'not_eligible' && (
+                  <p role="status" className="rounded bg-white p-3 text-amber-900">
+                    No eligible rows can be safely removed; execution is disabled.
+                  </p>
+                )}
+                <button
+                  type="button"
+                  onClick={onCancelCombinedRepairPreview}
+                  disabled={combinedRepairLoading}
+                  className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Cancel Preview
+                </button>
+              </div>
             )}
-            <button
-              type="button"
-              disabled={combinedRepairLoading || selectedCombinedFindingIds.length === 0}
-              onClick={onGenerateCombinedRepair}
-              className="inline-flex items-center gap-2 rounded-lg bg-teal-700 px-3 py-2 text-xs font-semibold text-white hover:bg-teal-800 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {combinedRepairLoading && <LoaderCircle className="h-3.5 w-3.5 animate-spin" />}
-              {combinedRepairLoading
-                ? 'Generating combined cleaned dataset…'
-                : 'Generate Combined Cleaned Dataset'}
-            </button>
+            {!combinedRepairPreview && (
+              <button
+                type="button"
+                disabled={combinedRepairLoading || selectedCombinedFindingIds.length === 0}
+                onClick={onPreviewCombinedRepair}
+                className="inline-flex items-center gap-2 rounded-lg bg-teal-700 px-3 py-2 text-xs font-semibold text-white hover:bg-teal-800 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {combinedRepairLoading && <LoaderCircle className="h-3.5 w-3.5 animate-spin" />}
+                {combinedRepairLoading ? 'Preparing server preview…' : 'Preview Combined Cleaning'}
+              </button>
+            )}
           </section>
 
           <section className="space-y-3 rounded-xl border border-slate-200 bg-white p-5 shadow-xs">
@@ -377,6 +525,7 @@ export const RepairPageView: React.FC<RepairPageViewProps> = ({
             ) : (
               findings.map((finding) => {
                 const supportedOperations = getSupportedFindingOperations(finding, datasetId);
+                const repairEligibility = getRepairEligibility(finding, datasetId);
                 return (
                   <article
                     key={finding.id}
@@ -405,6 +554,17 @@ export const RepairPageView: React.FC<RepairPageViewProps> = ({
                         Finding created: {finding.createdAt}
                       </p>
                     )}
+                    <p
+                      className="mt-2 text-xs text-slate-600"
+                      data-testid={`repair-eligibility-${finding.id}`}
+                    >
+                      Automatic repair: {repairEligibility.eligible ? 'eligible' : 'not eligible'}.
+                      {' '}{repairEligibility.explanation}
+                      {repairEligibility.eligible &&
+                        typeof repairEligibility.duplicateRowsToRemove === 'number' && (
+                          <> Evidence preview: {repairEligibility.duplicateRowsToRemove} later duplicate row(s) will be removed from the separate output.</>
+                        )}
+                    </p>
 
                     <div className="mt-4 flex flex-wrap gap-2">
                       {supportedOperations.map((operationType) => {
@@ -527,16 +687,34 @@ export const RepairPageView: React.FC<RepairPageViewProps> = ({
                       Output SHA-256: <code>{operation.outputFileSha256}</code>
                     </p>
                   )}
+                  {operation.operationType === 'repair' && (
+                    <p
+                      className="mt-2 text-xs"
+                      role={
+                        operation.operationMetadata?.verificationStatus === 'verified'
+                          ? 'status'
+                          : 'note'
+                      }
+                      data-testid={`repair-verification-${operation.id}`}
+                    >
+                      Post-repair verification:{' '}
+                      {operation.operationMetadata?.verificationStatus === 'verified'
+                        ? 'verified — output was readable, its schema and row count matched the expected result, and one row remains in the evidenced duplicate group.'
+                        : 'not available for this operation record.'}
+                    </p>
+                  )}
                   {operation.operationType === 'combined_repair' && operation.operationMetadata && (
                     <div className="mt-3 space-y-1 rounded-lg bg-teal-50 p-3 text-xs text-slate-700">
-                      <p>Original data rows: <strong>{operation.operationMetadata.originalRowCount}</strong></p>
-                      <p>Final data rows: <strong>{operation.operationMetadata.finalRowCount}</strong></p>
-                      <p>Duplicate rows removed: <strong>{operation.operationMetadata.duplicateRowsRemoved}</strong></p>
+                      <p>Original data rows: <strong>{operation.operationMetadata.originalRowCount ?? 'Not recorded'}</strong></p>
+                      <p>Final data rows: <strong>{operation.operationMetadata.finalRowCount ?? 'Not recorded'}</strong></p>
+                      <p>Duplicate rows removed: <strong>{operation.operationMetadata.duplicateRowsRemoved ?? 'Not recorded'}</strong></p>
                       <p className="break-all">
                         Applied findings:{' '}
-                        {operation.operationMetadata.appliedFindingIds.length
-                          ? operation.operationMetadata.appliedFindingIds.join(', ')
-                          : 'None'}
+                        {operation.operationMetadata.appliedFindingIds
+                          ? operation.operationMetadata.appliedFindingIds.length
+                            ? operation.operationMetadata.appliedFindingIds.join(', ')
+                            : 'None'
+                          : 'Not recorded'}
                       </p>
                       {operation.operationMetadata.skippedFindings.length > 0 && (
                         <div>
@@ -550,6 +728,12 @@ export const RepairPageView: React.FC<RepairPageViewProps> = ({
                           </ul>
                         </div>
                       )}
+                      {operation.operationMetadata.skippedFindings.length === 0
+                        && operation.operationMetadata.skippedFindingsRecorded === false && (
+                          <p role="note">
+                            Skipped-finding details were not recorded for this historical operation.
+                          </p>
+                        )}
                     </div>
                   )}
                   {operation.createdAt && (
@@ -616,6 +800,9 @@ export const RepairPage: React.FC = () => {
   const [selectedCombinedFindingIds, setSelectedCombinedFindingIds] = useState<string[]>([]);
   const [combinedRepairLoading, setCombinedRepairLoading] = useState(false);
   const [combinedRepairError, setCombinedRepairError] = useState<string | null>(null);
+  const [combinedRepairPreview, setCombinedRepairPreview] =
+    useState<CombinedRepairPreview | null>(null);
+  const [combinedRepairConfirmed, setCombinedRepairConfirmed] = useState(false);
   const [retryCount, setRetryCount] = useState(0);
   const operationInFlight = useRef(false);
   const downloadInFlight = useRef(false);
@@ -626,6 +813,8 @@ export const RepairPage: React.FC = () => {
     setOperationError(null);
     setCombinedRepairError(null);
     setSelectedCombinedFindingIds([]);
+    setCombinedRepairPreview(null);
+    setCombinedRepairConfirmed(false);
     if (!id?.trim()) {
       setFindings([]);
       setHistory([]);
@@ -668,6 +857,15 @@ export const RepairPage: React.FC = () => {
         !getSupportedFindingOperations(finding, id).includes(operationType) ||
         operationInFlight.current ||
         getRecordedOperation(finding.id, operationType, history)
+      ) {
+        return;
+      }
+      if (
+        operationType === 'repair' &&
+        typeof window !== 'undefined' &&
+        !window.confirm(
+          `Review repair preview: keep the first row in the evidenced exact-duplicate group and remove ${getRepairEligibility(finding, id).duplicateRowsToRemove ?? 'the evidenced number of'} later duplicate row(s) from a separate output. The uploaded original will not be modified. Continue?`
+        )
       ) {
         return;
       }
@@ -731,6 +929,8 @@ export const RepairPage: React.FC = () => {
 
   const handleToggleCombinedFinding = useCallback((findingId: string) => {
     setCombinedRepairError(null);
+    setCombinedRepairPreview(null);
+    setCombinedRepairConfirmed(false);
     setSelectedCombinedFindingIds((previous) =>
       previous.includes(findingId)
         ? previous.filter((selectedId) => selectedId !== findingId)
@@ -738,7 +938,7 @@ export const RepairPage: React.FC = () => {
     );
   }, []);
 
-  const handleGenerateCombinedRepair = useCallback(async () => {
+  const handlePreviewCombinedRepair = useCallback(async () => {
     if (!id || combinedRepairInFlight.current) return;
     const selectionError = validateCombinedRepairSelection(selectedCombinedFindingIds);
     if (selectionError) {
@@ -759,7 +959,47 @@ export const RepairPage: React.FC = () => {
     setCombinedRepairLoading(true);
     setCombinedRepairError(null);
     try {
-      const result = await generateCombinedCleanedDataset(id, selectedCombinedFindingIds);
+      const result = await previewCombinedCleanedDataset(id, selectedCombinedFindingIds);
+      if (
+        result.datasetId !== id ||
+        result.operationType !== 'combined_repair_preview' ||
+        (result.status === 'preview' && !result.previewToken)
+      ) {
+        throw new Error('Backend returned an invalid combined-cleaning preview.');
+      }
+      setCombinedRepairPreview(result);
+      setCombinedRepairConfirmed(false);
+    } catch (error) {
+      setCombinedRepairPreview(null);
+      setCombinedRepairError(
+        error instanceof Error ? error.message : 'Failed to preview combined cleaning.'
+      );
+    } finally {
+      combinedRepairInFlight.current = false;
+      setCombinedRepairLoading(false);
+    }
+  }, [findings, history, id, selectedCombinedFindingIds]);
+
+  const handleConfirmCombinedRepair = useCallback(async () => {
+    if (
+      !id ||
+      combinedRepairInFlight.current ||
+      !combinedRepairConfirmed ||
+      !combinedRepairPreview?.previewToken
+    ) {
+      return;
+    }
+
+    combinedRepairInFlight.current = true;
+    setCombinedRepairLoading(true);
+    setCombinedRepairError(null);
+    try {
+      const result = await generateCombinedCleanedDataset(
+        id,
+        selectedCombinedFindingIds,
+        combinedRepairPreview.previewToken,
+        true
+      );
       if (
         result.datasetId !== id ||
         result.operationType !== 'combined_repair' ||
@@ -773,17 +1013,30 @@ export const RepairPage: React.FC = () => {
         ...previous.filter((operation) => operation.id !== result.id),
       ]);
       setSelectedCombinedFindingIds([]);
+      setCombinedRepairPreview(null);
+      setCombinedRepairConfirmed(false);
     } catch (error) {
       setCombinedRepairError(
         error instanceof Error
           ? error.message
-          : 'Failed to generate the combined cleaned dataset.'
+          : 'Failed to generate the confirmed combined cleaned dataset.'
       );
     } finally {
       combinedRepairInFlight.current = false;
       setCombinedRepairLoading(false);
     }
-  }, [findings, history, id, selectedCombinedFindingIds]);
+  }, [
+    combinedRepairConfirmed,
+    combinedRepairPreview,
+    id,
+    selectedCombinedFindingIds,
+  ]);
+
+  const handleCancelCombinedRepairPreview = useCallback(() => {
+    setCombinedRepairPreview(null);
+    setCombinedRepairConfirmed(false);
+    setCombinedRepairError(null);
+  }, []);
 
   return (
     <RepairPageView
@@ -799,6 +1052,8 @@ export const RepairPage: React.FC = () => {
       selectedCombinedFindingIds={selectedCombinedFindingIds}
       combinedRepairLoading={combinedRepairLoading}
       combinedRepairError={combinedRepairError}
+      combinedRepairPreview={combinedRepairPreview}
+      combinedRepairConfirmed={combinedRepairConfirmed}
       activeOperationKey={
         activeOperationKey
           ? activeOperationKey
@@ -809,7 +1064,10 @@ export const RepairPage: React.FC = () => {
       onRunOperation={handleRunOperation}
       onDownloadOperation={handleDownloadOperation}
       onToggleCombinedFinding={handleToggleCombinedFinding}
-      onGenerateCombinedRepair={handleGenerateCombinedRepair}
+      onPreviewCombinedRepair={handlePreviewCombinedRepair}
+      onCancelCombinedRepairPreview={handleCancelCombinedRepairPreview}
+      onCombinedRepairConfirmedChange={setCombinedRepairConfirmed}
+      onConfirmCombinedRepair={handleConfirmCombinedRepair}
       onRetry={() => setRetryCount((count) => count + 1)}
     />
   );

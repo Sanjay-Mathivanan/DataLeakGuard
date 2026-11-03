@@ -15,7 +15,7 @@ import {
   Calendar
 } from 'lucide-react';
 import { AssuranceReport } from '../types';
-import { getReportById } from '../services/api';
+import { downloadReport, getReportById } from '../services/api';
 import { StatusBadge } from '../components/common/StatusBadge';
 import { SeverityBadge } from '../components/common/SeverityBadge';
 import { CardSkeleton } from '../components/common/LoadingSkeleton';
@@ -24,10 +24,11 @@ import { useToast } from '../context/ToastContext';
 export const ReportDetailPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { success, info } = useToast();
+  const { success, error } = useToast();
 
   const [report, setReport] = useState<AssuranceReport | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
 
   useEffect(() => {
     async function load() {
@@ -35,6 +36,8 @@ export const ReportDetailPage: React.FC = () => {
       try {
         const found = await getReportById(id);
         setReport(found);
+      } catch (loadFailure) {
+        setLoadError(loadFailure instanceof Error ? loadFailure.message : 'Could not load the persisted report.');
       } finally {
         setLoading(false);
       }
@@ -42,11 +45,14 @@ export const ReportDetailPage: React.FC = () => {
     load();
   }, [id]);
 
-  const handleDownloadPDF = () => {
-    info('Exporting PDF', 'Formatting formal assurance audit document...');
-    setTimeout(() => {
-      window.print();
-    }, 500);
+  const handleDownloadHTML = async () => {
+    if (!id) return;
+    try {
+      await downloadReport(id, 'html');
+      success('Report Downloaded', 'The persisted HTML report was downloaded.');
+    } catch (downloadError) {
+      error('Download Error', downloadError instanceof Error ? downloadError.message : 'Could not download report.');
+    }
   };
 
   if (loading) {
@@ -54,6 +60,20 @@ export const ReportDetailPage: React.FC = () => {
       <div className="space-y-6 max-w-4xl mx-auto">
         <CardSkeleton />
         <CardSkeleton />
+      </div>
+    );
+  }
+
+  if (loadError) {
+    return (
+      <div role="alert" className="p-8 text-center bg-rose-50 rounded-xl border border-rose-200 text-rose-800">
+        <p>{loadError}</p>
+        <button
+          onClick={() => navigate('/reports')}
+          className="mt-4 px-4 py-2 text-xs font-semibold rounded-lg bg-teal-700 hover:bg-teal-800 text-white transition-colors"
+        >
+          Return to Reports
+        </button>
       </div>
     );
   }
@@ -72,6 +92,15 @@ export const ReportDetailPage: React.FC = () => {
     );
   }
 
+  const impactLabels: Record<string, string> = {
+    findings_total: 'Persisted findings',
+    findings_open: 'Open findings',
+    findings_high_severity: 'High-severity findings',
+    operations_total: 'Persisted operations',
+    operations_completed: 'Completed operations',
+    affected_rows: 'Affected rows',
+  };
+
   return (
     <div className="space-y-6 max-w-4xl mx-auto animate-in fade-in duration-200">
       {/* Top Action Bar */}
@@ -86,11 +115,11 @@ export const ReportDetailPage: React.FC = () => {
 
         <div className="flex items-center gap-2">
           <button
-            onClick={handleDownloadPDF}
+            onClick={handleDownloadHTML}
             className="px-4 py-2 text-xs font-semibold rounded-lg bg-teal-700 hover:bg-teal-800 text-white transition-colors flex items-center gap-2 shadow-xs"
           >
             <Download className="w-4 h-4" />
-            <span>Download PDF / Print</span>
+            <span>Download HTML Report</span>
           </button>
         </div>
       </div>
@@ -105,7 +134,7 @@ export const ReportDetailPage: React.FC = () => {
               <span>DATALEAKGUARD-CV</span>
             </div>
             <h1 className="text-2xl font-bold tracking-tight text-slate-900 font-mono">
-              ML Integrity Assurance Report
+              Persisted Dataset Integrity Snapshot
             </h1>
             <p className="text-xs text-slate-500 mt-1">
               Document Reference: {report.id} · Created {report.createdAt}
@@ -113,7 +142,7 @@ export const ReportDetailPage: React.FC = () => {
           </div>
 
           <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-right shrink-0">
-            <span className="text-[10px] uppercase font-mono text-slate-500 block">Assurance Disposition</span>
+            <span className="text-[10px] uppercase font-mono text-slate-500 block">Assessment</span>
             <div className="flex items-center justify-end gap-2 mt-1">
               <span className={`text-sm font-bold font-mono px-2.5 py-0.5 rounded ${
                 report.disposition === 'ACCEPT'
@@ -126,7 +155,7 @@ export const ReportDetailPage: React.FC = () => {
               </span>
             </div>
             <span className="text-[10px] text-slate-500 font-mono block mt-1">
-              Confidence: {report.confidenceScore}%
+              Confidence: {report.confidenceScore == null ? 'Not assessed' : `${report.confidenceScore}%`}
             </span>
           </div>
         </div>
@@ -138,18 +167,50 @@ export const ReportDetailPage: React.FC = () => {
             <span className="font-semibold text-slate-900 mt-0.5 block truncate">{report.datasetName}</span>
           </div>
           <div>
-            <span className="text-slate-500 block text-[10px] font-mono uppercase">Evaluated Model</span>
+            <span className="text-slate-500 block text-[10px] font-mono uppercase">Model Evaluation</span>
             <span className="font-semibold text-slate-900 mt-0.5 block truncate">{report.modelName}</span>
           </div>
           <div>
-            <span className="text-slate-500 block text-[10px] font-mono uppercase">Project-Defined Risk</span>
-            <span className="font-mono font-bold text-amber-700 mt-0.5 block">{report.projectDefinedRisk}</span>
+            <span className="text-slate-500 block text-[10px] font-mono uppercase">Risk Assessment</span>
+            <span className="font-mono font-bold text-slate-700 mt-0.5 block">{report.projectDefinedRisk}</span>
           </div>
           <div>
-            <span className="text-slate-500 block text-[10px] font-mono uppercase">Reported Inflation</span>
-            <span className="font-mono font-bold text-rose-700 mt-0.5 block">+7.4% Accuracy</span>
+            <span className="text-slate-500 block text-[10px] font-mono uppercase">Model Evaluation</span>
+            <span className="font-mono font-bold text-slate-700 mt-0.5 block">Not configured</span>
           </div>
         </div>
+
+        <section className="space-y-2">
+          <h2 className="text-sm font-bold font-mono text-slate-900 uppercase tracking-wider">
+            Persisted Dataset Manifest
+          </h2>
+          {report.persistedContent?.datasets.length ? (
+            <div className="overflow-x-auto rounded-lg border border-slate-200">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-slate-50 text-slate-500">
+                  <tr>
+                    <th className="p-3 font-semibold">Dataset</th>
+                    <th className="p-3 font-semibold">ID</th>
+                    <th className="p-3 font-semibold">Format</th>
+                    <th className="p-3 font-semibold">Persisted SHA-256</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {report.persistedContent.datasets.map((dataset) => (
+                    <tr key={dataset.id || dataset.name}>
+                      <td className="p-3">{dataset.name}</td>
+                      <td className="p-3 font-mono">{dataset.id || 'Not available'}</td>
+                      <td className="p-3">{dataset.format}</td>
+                      <td className="p-3 font-mono break-all">{dataset.sha256 ?? 'Not available'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <p className="text-xs text-slate-600">No persisted dataset manifest is available in this report.</p>
+          )}
+        </section>
 
         {/* Section 1: Executive Summary */}
         <section className="space-y-2">
@@ -177,29 +238,35 @@ export const ReportDetailPage: React.FC = () => {
         <section className="space-y-2">
           <h2 className="text-sm font-bold font-mono text-slate-900 uppercase tracking-wider flex items-center gap-2">
             <span className="text-teal-700">03.</span>
-            <span>Leakage Findings</span>
+            <span>Persisted Impact Counts</span>
           </h2>
           <p className="text-xs text-slate-600 leading-relaxed">
             {report.sections.leakageFindings}
           </p>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-2 pt-2">
-            <div className="p-2.5 bg-slate-50 rounded border border-slate-200 text-[11px] font-mono">
-              <span className="text-slate-500 block">Critical:</span>
-              <span className="font-bold text-rose-700">{report.findingsCount.critical}</span>
+          {report.persistedContent?.impact.length ? (
+            <div className="space-y-3 pt-2">
+              {report.persistedContent.impact.map((metrics, index) => (
+                <div key={report.persistedContent?.datasets[index]?.id ?? index} className="rounded-lg border border-slate-200 p-3">
+                  <p className="mb-2 text-[11px] font-semibold text-slate-700">
+                    {report.persistedContent?.datasets[index]?.name ?? `Persisted metric group ${index + 1}`}
+                  </p>
+                  <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+                    {Object.entries(metrics).map(([key, value]) => (
+                      <div key={key} className="p-2.5 bg-slate-50 rounded border border-slate-200 text-[11px]">
+                        <span className="text-slate-500 block">{impactLabels[key] ?? key}</span>
+                        <span className="font-bold text-slate-800">{value.toLocaleString()}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
             </div>
-            <div className="p-2.5 bg-slate-50 rounded border border-slate-200 text-[11px] font-mono">
-              <span className="text-slate-500 block">High:</span>
-              <span className="font-bold text-orange-700">{report.findingsCount.high}</span>
-            </div>
-            <div className="p-2.5 bg-slate-50 rounded border border-slate-200 text-[11px] font-mono">
-              <span className="text-slate-500 block">Medium:</span>
-              <span className="font-bold text-amber-700">{report.findingsCount.medium}</span>
-            </div>
-            <div className="p-2.5 bg-slate-50 rounded border border-slate-200 text-[11px] font-mono">
-              <span className="text-slate-500 block">Low:</span>
-              <span className="font-bold text-slate-700">{report.findingsCount.low}</span>
-            </div>
-          </div>
+          ) : (
+            <p className="pt-2 text-xs text-slate-600">Persisted impact counts are not available in this report.</p>
+          )}
+          <p className="text-[11px] text-slate-500">
+            Severity-level counts and full finding evidence are not included in this persisted report snapshot.
+          </p>
         </section>
 
         {/* Section 4: Dataset Anomalies */}
@@ -313,8 +380,8 @@ export const ReportDetailPage: React.FC = () => {
 
         {/* Document Footer */}
         <div className="pt-6 border-t border-slate-200 flex flex-col sm:flex-row items-center justify-between text-[11px] font-mono text-slate-500">
-          <span>Generated by DataLeakGuard-CV · Evidence-Based ML & CV Integrity Engine</span>
-          <span>Security Assurance Snapshot #DLG-{report.id.replace('REP-', '')}</span>
+          <span>Generated by DataLeakGuard-CV from persisted application records</span>
+          <span>Persisted Report ID · {report.id}</span>
         </div>
       </div>
     </div>

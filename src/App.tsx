@@ -15,8 +15,9 @@ import { DashboardPage } from './pages/DashboardPage';
 import { DatasetsPage } from './pages/DatasetsPage';
 import { DatasetDetailPage } from './pages/DatasetDetailPage';
 import { AnalysisPage } from './pages/AnalysisPage';
+import { AnalysisSetupPage } from './pages/AnalysisSetupPage';
 import { LeakageAnalysisPage } from './pages/LeakageAnalysisPage';
-import { RepairPage } from './pages/RepairPage';
+import { RemediationCenterPage } from './pages/RemediationCenterPage';
 import { ImpactAnalysisPage } from './pages/ImpactAnalysisPage';
 import { ModelIntegrityPage } from './pages/ModelIntegrityPage';
 import { InferenceProvenancePage } from './pages/InferenceProvenancePage';
@@ -82,9 +83,11 @@ export default function App() {
               <Route path="dashboard" element={<DashboardPage />} />
               <Route path="datasets" element={<DatasetsPage />} />
               <Route path="datasets/:id" element={<DatasetDetailPage />} />
+              <Route path="analysis-setup/:id" element={<AnalysisSetupPage />} />
               <Route path="analysis/:id" element={<AnalysisPage />} />
               <Route path="leakage-analysis/:id" element={<LeakageAnalysisPage />} />
-              <Route path="repair/:id" element={<RepairPage />} />
+              <Route path="repair/:id" element={<RemediationCenterPage />} />
+              <Route path="remediation/:id" element={<RemediationCenterPage />} />
               <Route path="impact-analysis" element={<ImpactAnalysisPage />} />
               <Route path="model-integrity" element={<ModelIntegrityPage />} />
               <Route path="inference-provenance" element={<InferenceProvenancePage />} />

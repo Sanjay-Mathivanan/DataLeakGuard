@@ -7,7 +7,41 @@ from app.db import models, leakage_models
 from app.utils.file_storage import ORIGINAL_DIR
 from app.utils.row_hashing import hash_row
 
-def detect_exact_duplicates(dataset_id: str, db: Session, exclude_columns: Optional[List[str]] = None):
+
+def _load_analysis_frame(
+    dataset: models.Dataset,
+    supplied_frame: Optional[pd.DataFrame] = None,
+) -> pd.DataFrame:
+    """Use an explicitly supplied analysis frame or load the registered original."""
+    if supplied_frame is not None:
+        if not isinstance(supplied_frame, pd.DataFrame):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Analysis frame must be a pandas DataFrame",
+            )
+        return supplied_frame.copy()
+
+    storage_path = ORIGINAL_DIR / dataset.storage_filename
+    if not os.path.exists(storage_path):
+        raise HTTPException(status_code=404, detail="Stored file not found")
+    try:
+        if dataset.format.upper() == "CSV":
+            return pd.read_csv(storage_path, dtype=str)
+        if dataset.format.upper() == "XLSX":
+            return pd.read_excel(storage_path, dtype=str)
+        raise HTTPException(status_code=400, detail="Unsupported file format")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Failed to read file: {str(exc)}")
+
+
+def detect_exact_duplicates(
+    dataset_id: str,
+    db: Session,
+    exclude_columns: Optional[List[str]] = None,
+    analysis_frame: Optional[pd.DataFrame] = None,
+):
     """
     Detect exact duplicate rows in a dataset's stored file.
     Returns analysis metadata and creates/updates LeakageFinding records.
@@ -22,21 +56,7 @@ def detect_exact_duplicates(dataset_id: str, db: Session, exclude_columns: Optio
     if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
 
-    # Build storage path
-    storage_path = ORIGINAL_DIR / dataset.storage_filename
-    if not os.path.exists(storage_path):
-        raise HTTPException(status_code=404, detail="Stored file not found")
-
-    # Read file based on format
-    try:
-        if dataset.format.upper() == "CSV":
-            df = pd.read_csv(storage_path, dtype=str)  # read all as string to preserve exact values
-        elif dataset.format.upper() == "XLSX":
-            df = pd.read_excel(storage_path, dtype=str)
-        else:
-            raise HTTPException(status_code=400, detail="Unsupported file format")
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to read file: {str(e)}")
+    df = _load_analysis_frame(dataset, analysis_frame)
 
 
     # Persist the exact columns used to compute each hash. A later repair
@@ -162,7 +182,8 @@ def detect_entity_overlap(
     dataset_id: str,
     db: Session,
     entity_column: str,
-    split_column: str
+    split_column: str,
+    analysis_frame: Optional[pd.DataFrame] = None,
 ) -> list:
     """
     Detect entity overlap in a dataset's stored file.
@@ -173,21 +194,7 @@ def detect_entity_overlap(
     if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
 
-    # Build storage path
-    storage_path = ORIGINAL_DIR / dataset.storage_filename
-    if not os.path.exists(storage_path):
-        raise HTTPException(status_code=404, detail="Stored file not found")
-
-    # Read file based on format
-    try:
-        if dataset.format.upper() == "CSV":
-            df = pd.read_csv(storage_path, dtype=str)
-        elif dataset.format.upper() == "XLSX":
-            df = pd.read_excel(storage_path, dtype=str)
-        else:
-            raise HTTPException(status_code=400, detail="Unsupported file format")
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to read file: {str(e)}")
+    df = _load_analysis_frame(dataset, analysis_frame)
 
     # Check that entity_column and split_column exist
     if entity_column not in df.columns:
@@ -323,7 +330,8 @@ def detect_entity_overlap(
 def detect_target_leakage(
     dataset_id: str,
     db: Session,
-    target_column: str
+    target_column: str,
+    analysis_frame: Optional[pd.DataFrame] = None,
 ) -> list:
     """
     Detect target leakage in a dataset's stored file.
@@ -334,21 +342,7 @@ def detect_target_leakage(
     if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
 
-    # Build storage path
-    storage_path = ORIGINAL_DIR / dataset.storage_filename
-    if not os.path.exists(storage_path):
-        raise HTTPException(status_code=404, detail="Stored file not found")
-
-    # Read file based on format
-    try:
-        if dataset.format.upper() == "CSV":
-            df = pd.read_csv(storage_path, dtype=str)
-        elif dataset.format.upper() == "XLSX":
-            df = pd.read_excel(storage_path, dtype=str)
-        else:
-            raise HTTPException(status_code=400, detail="Unsupported file format")
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to read file: {str(e)}")
+    df = _load_analysis_frame(dataset, analysis_frame)
 
     # Check that target_column exists
     if target_column not in df.columns:
@@ -569,7 +563,8 @@ def detect_temporal_leakage(
     dataset_id: str,
     db: Session,
     time_column: str,
-    split_column: str
+    split_column: str,
+    analysis_frame: Optional[pd.DataFrame] = None,
 ) -> list:
     """
     Detect temporal leakage in a dataset's stored file.
@@ -580,21 +575,7 @@ def detect_temporal_leakage(
     if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
 
-    # Build storage path
-    storage_path = ORIGINAL_DIR / dataset.storage_filename
-    if not os.path.exists(storage_path):
-        raise HTTPException(status_code=404, detail="Stored file not found")
-
-    # Read file based on format
-    try:
-        if dataset.format.upper() == "CSV":
-            df = pd.read_csv(storage_path, dtype=str)
-        elif dataset.format.upper() == "XLSX":
-            df = pd.read_excel(storage_path, dtype=str)
-        else:
-            raise HTTPException(status_code=400, detail="Unsupported file format")
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to read file: {str(e)}")
+    df = _load_analysis_frame(dataset, analysis_frame)
 
     # Check that time_column and split_column exist
     if time_column not in df.columns:
@@ -781,7 +762,8 @@ def detect_temporal_leakage(
 def detect_train_test_contamination(
     dataset_id: str,
     db: Session,
-    split_column: str
+    split_column: str,
+    analysis_frame: Optional[pd.DataFrame] = None,
 ) -> list:
     """
     Detect train/test contamination in a dataset's stored file.
@@ -793,21 +775,7 @@ def detect_train_test_contamination(
     if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
 
-    # Build storage path
-    storage_path = ORIGINAL_DIR / dataset.storage_filename
-    if not os.path.exists(storage_path):
-        raise HTTPException(status_code=404, detail="Stored file not found")
-
-    # Read file based on format
-    try:
-        if dataset.format.upper() == "CSV":
-            df = pd.read_csv(storage_path, dtype=str)
-        elif dataset.format.upper() == "XLSX":
-            df = pd.read_excel(storage_path, dtype=str)
-        else:
-            raise HTTPException(status_code=400, detail="Unsupported file format")
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to read file: {str(e)}")
+    df = _load_analysis_frame(dataset, analysis_frame)
 
     # Check that split_column exists
     if split_column not in df.columns:

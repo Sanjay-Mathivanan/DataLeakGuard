@@ -113,3 +113,62 @@ class Notification(Base):
     finding_id = Column(String, nullable=True, index=True)
     operation_id = Column(String, nullable=True, index=True)
     deduplication_key = Column(String, nullable=True, unique=True)
+
+
+class ModelArtifact(Base):
+    __tablename__ = "model_artifacts"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    owner_user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    name = Column(String, nullable=False)
+    version = Column(String, nullable=True)
+    storage_filename = Column(String, nullable=False)
+    original_filename = Column(String, nullable=False)
+    sha256 = Column(String, nullable=False, index=True)
+    size_bytes = Column(Integer, nullable=False)
+    metadata_json = Column(JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class ProvenanceRecord(Base):
+    __tablename__ = "provenance_records"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    owner_user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    dataset_id = Column(String, ForeignKey("datasets.id"), nullable=False, index=True)
+    metadata_json = Column(JSON, nullable=False)
+    prediction_status = Column(String, nullable=False, default="no_prediction")
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class DistributionComparison(Base):
+    __tablename__ = "distribution_comparisons"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    owner_user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    reference_dataset_id = Column(String, ForeignKey("datasets.id"), nullable=False)
+    comparison_dataset_id = Column(String, ForeignKey("datasets.id"), nullable=False)
+    metrics_json = Column(JSON, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class ImpactMetric(Base):
+    __tablename__ = "impact_metrics"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    owner_user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    dataset_id = Column(String, ForeignKey("datasets.id"), nullable=False, index=True)
+    metrics_json = Column(JSON, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class ReportMetadata(Base):
+    __tablename__ = "report_metadata"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    owner_user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    dataset_id = Column(String, ForeignKey("datasets.id"), nullable=True, index=True)
+    title = Column(String, nullable=False)
+    format = Column(String, nullable=False)
+    content_json = Column(JSON, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)

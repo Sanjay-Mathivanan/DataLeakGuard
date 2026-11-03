@@ -1,50 +1,34 @@
-/**
- * DataLeakGuard-CV Mock API Service Layer
- *
- * NOTE FOR BACKEND INTEGRATION:
- * This module is designed to be a direct 1:1 drop-in replacement for a FastAPI backend.
- * Each function returns a Promise. When migrating to FastAPI:
- * Replace mock storage updates with standard `fetch('/api/v1/...')` calls.
- *
- * Example:
- * export async function getDatasets(): Promise<Dataset[]> {
- *   const res = await fetch('/api/v1/datasets');
- *   return res.json();
- * }
- */
+/** Authenticated API service for the DataLeakGuard-CV FastAPI backend. */
 
 import {
   Dataset,
   PersistedFinding,
+  DatasetFindingPage,
+  FindingPageFilters,
+  DatasetHistoryPage,
+  DatasetHistoryItem,
+  ColumnRecommendationsResponse,
   FindingCategorySummary,
   AnalysisResult,
   AnalysisStage,
   DatasetOperationRecord,
+  SplitGenerationOperation,
   CombinedRepairMetadata,
+  CombinedRepairPreview,
+  RemediationActionRequest,
+  RemediationPlanPage,
+  RemediationPlanRecord,
   FindingOperationType,
   Model,
   InferenceRecord,
   DistributionShift,
   ImpactAnalysis,
   AssuranceReport,
+  PersistedReportContent,
+  PersistedReportDataset,
+  PersistedReportImpact,
   Activity
 } from '../types';
-
-import { initialDatasets } from '../data/mockDatasets';
-import { initialModels } from '../data/mockModels';
-import { initialInferenceRecords } from '../data/mockInference';
-import { mockImpactData, mockDistributionShiftData } from '../data/mockImpact';
-import { initialReports } from '../data/mockReports';
-import { initialActivities } from '../data/mockActivities';
-
-// In-memory state holding dynamic modifications
-let datasetsStore: Dataset[] = [...initialDatasets];
-let modelsStore: Model[] = [...initialModels];
-let inferenceStore: InferenceRecord[] = [...initialInferenceRecords];
-let reportsStore: AssuranceReport[] = [...initialReports];
-let activitiesStore: Activity[] = [...initialActivities];
-
-const delay = (ms = 400) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const toCamelCase = (obj: any): any => {
   if (obj === null || typeof obj !== 'object') return obj;
@@ -131,8 +115,8 @@ export interface DashboardSummary {
     status: string;
     createdAt: string | null;
   }>;
-  models: { available: boolean; reason?: string };
-  reports: { available: boolean; reason?: string };
+  models: { available: boolean; count?: number; reason?: string };
+  reports: { available: boolean; count?: number; reason?: string };
 }
 
 async function readApiError(response: Response, fallback: string): Promise<Error> {
@@ -245,6 +229,61 @@ export async function getDatasetHistory(datasetId: string): Promise<Array<Record
   if (!response.ok) throw await readApiError(response, 'Could not load dataset history');
   const data: unknown = await response.json();
   return Array.isArray(data) ? data.map(toCamelCase) : [];
+}
+
+export async function getDatasetHistoryPage(
+  datasetId: string,
+  filters: {
+    skip?: number;
+    limit?: number;
+    eventType?: string;
+    status?: string;
+    startDate?: string;
+    endDate?: string;
+    search?: string;
+  } = {}
+): Promise<DatasetHistoryPage> {
+  const query = new URLSearchParams();
+  if (filters.skip !== undefined) query.set('skip', String(filters.skip));
+  if (filters.limit !== undefined) query.set('limit', String(filters.limit));
+  if (filters.eventType) query.set('event_type', filters.eventType);
+  if (filters.status) query.set('status', filters.status);
+  if (filters.startDate) query.set('start_date', filters.startDate);
+  if (filters.endDate) query.set('end_date', filters.endDate);
+  if (filters.search?.trim()) query.set('search', filters.search.trim());
+
+  const response = await apiFetch(
+    `${getApiBaseUrl()}/datasets/${encodeURIComponent(datasetId)}/history/page?${query.toString()}`
+  );
+  if (!response.ok) throw await readApiError(response, 'Could not load dataset history');
+  const raw: unknown = await response.json();
+  if (!isRecord(raw) || !Array.isArray(raw.items)) {
+    throw new Error('Invalid dataset history page response');
+  }
+  const items: DatasetHistoryItem[] = raw.items.map((item: unknown) => {
+    if (!isRecord(item)) throw new Error('Invalid dataset history item');
+    const mapped = toCamelCase(item);
+    return {
+      id: String(mapped.id ?? ''),
+      eventType: String(mapped.eventType ?? ''),
+      outcome: String(mapped.outcome ?? ''),
+      details: isRecord(item.details) ? item.details : null,
+      createdAt: String(mapped.createdAt ?? ''),
+      completedAt: typeof mapped.completedAt === 'string' ? mapped.completedAt : null,
+      datasetId: String(mapped.datasetId ?? ''),
+      datasetName: String(mapped.datasetName ?? ''),
+      findingId: typeof mapped.findingId === 'string' ? mapped.findingId : null,
+      operationId: typeof mapped.operationId === 'string' ? mapped.operationId : null,
+      userId: typeof mapped.userId === 'string' ? mapped.userId : null,
+      failureReason: typeof mapped.failureReason === 'string' ? mapped.failureReason : null,
+    };
+  });
+  return {
+    items,
+    total: typeof raw.total === 'number' ? raw.total : 0,
+    skip: typeof raw.skip === 'number' ? raw.skip : 0,
+    limit: typeof raw.limit === 'number' ? raw.limit : 25,
+  };
 }
 
 export async function changePassword(
@@ -391,6 +430,8 @@ export interface LeakageAnalysisOptions {
   splitColumn?: string;
   targetColumn?: string;
   timeColumn?: string;
+  splitStrategy?: 'existing' | 'generated' | 'none';
+  splitOperationId?: string;
 }
 
 type DetectorStageStatus = AnalysisStage['status'];
@@ -401,8 +442,11 @@ export function buildAnalysisStages(
   execution: 'not_started' | 'running' | 'completed' | 'failed' = 'not_started'
 ): AnalysisStage[] {
   const hasEntity = Boolean(options.entityColumn);
-  const hasSplit = Boolean(options.splitColumn);
+  const hasSplit = options.splitStrategy === 'none'
+    ? false
+    : Boolean(options.splitColumn || (options.splitStrategy === 'generated' && options.splitOperationId));
   const hasTime = Boolean(options.timeColumn);
+  const noSplit = options.splitStrategy === 'none';
   const detectorStages: Array<{
     id: number;
     name: string;
@@ -431,7 +475,8 @@ export function buildAnalysisStages(
       name: 'Entity Overlap',
       findingType: 'entity_overlap',
       requested: hasEntity && hasSplit,
-      needsConfiguration: hasEntity && !hasSplit,
+      needsConfiguration: hasEntity && !hasSplit && !noSplit,
+      skipped: noSplit,
       requirement: 'Select both an entity/identifier column and a split column.'
     },
     {
@@ -446,7 +491,8 @@ export function buildAnalysisStages(
       name: 'Temporal Leakage',
       findingType: 'temporal_leakage',
       requested: hasTime && hasSplit,
-      needsConfiguration: hasTime && !hasSplit,
+      needsConfiguration: hasTime && !hasSplit && !noSplit,
+      skipped: noSplit,
       requirement: 'Select both a timestamp/time column and a split column.'
     },
     {
@@ -454,6 +500,7 @@ export function buildAnalysisStages(
       name: 'Train/Test Contamination',
       findingType: 'train_test_contamination',
       requested: hasSplit,
+      skipped: noSplit,
       requirement: 'Select a split column to run this detector.'
     },
     {
@@ -503,7 +550,9 @@ export function buildAnalysisStages(
       description:
         status === 'completed'
           ? `${stage.requirement} The backend request completed successfully.`
-          : stage.requirement
+          : stage.skipped && noSplit
+            ? `${stage.requirement} Not evaluated because no split strategy was selected.`
+            : stage.requirement
     };
   });
 }
@@ -524,6 +573,8 @@ export async function runDatasetAnalysis(
   // Omit incomplete optional pairs while still allowing independent detectors
   // (exact duplicates, target leakage, and split-only contamination) to run.
   if (options.splitColumn) url.searchParams.set('split_column', options.splitColumn);
+  if (options.splitStrategy) url.searchParams.set('split_strategy', options.splitStrategy);
+  if (options.splitOperationId) url.searchParams.set('split_operation_id', options.splitOperationId);
   if (options.targetColumn) url.searchParams.set('target_column', options.targetColumn);
   if (options.entityColumn && options.splitColumn) {
     url.searchParams.set('entity_column', options.entityColumn);
@@ -560,10 +611,24 @@ export async function runDatasetAnalysis(
     typeCounts[finding.findingType] = (typeCounts[finding.findingType] ?? 0) + 1;
   }
 
-  const stages = buildAnalysisStages(typeCounts, options, 'completed');
+  const responseStrategy =
+    data.split_strategy === 'existing' ||
+    data.split_strategy === 'generated' ||
+    data.split_strategy === 'none'
+      ? data.split_strategy
+      : options.splitStrategy ?? (options.splitColumn ? 'existing' : 'none');
+  const resolvedOptions = { ...options, splitStrategy: responseStrategy };
+  const stages = buildAnalysisStages(typeCounts, resolvedOptions, 'completed');
   for (const [index, stage] of stages.entries()) {
     if (stage.status === 'completed') reportProgress?.(index, stage.name);
   }
+
+  const splitConfiguration = isRecord(data.split_configuration)
+    ? data.split_configuration
+    : {};
+  const skippedDetectors = Array.isArray(data.skipped_detectors)
+    ? data.skipped_detectors.filter((item): item is string => typeof item === 'string')
+    : [];
 
   return {
     id: `ans-${Date.now().toString(36)}`,
@@ -575,7 +640,44 @@ export async function runDatasetAnalysis(
       totalFindings: findings.length,
       duplicateFindings: typeCounts.exact_duplicate ?? 0,
     },
+    splitStrategy: responseStrategy,
+    splitConfiguration,
+    skippedDetectors,
+    splitExplanation:
+      typeof data.split_explanation === 'string' ? data.split_explanation : null,
   };
+}
+
+export async function generateDatasetSplit(
+  datasetId: string,
+  configuration: { testRatio: number; randomSeed: number }
+): Promise<SplitGenerationOperation> {
+  const response = await apiFetch(
+    `${getApiBaseUrl()}/datasets/${encodeURIComponent(datasetId)}/split-strategies/generate`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        test_ratio: configuration.testRatio,
+        random_seed: configuration.randomSeed,
+      }),
+    }
+  );
+  if (!response.ok) {
+    let detail = '';
+    try {
+      const body: unknown = await response.json();
+      if (isRecord(body) && typeof body.detail === 'string') detail = `: ${body.detail}`;
+    } catch {
+      // Use HTTP status when the error response is not JSON.
+    }
+    throw new Error(`Split generation failed (${response.status})${detail}`);
+  }
+  const data: unknown = await response.json();
+  if (!isRecord(data) || typeof data.id !== 'string' || typeof data.output_filename !== 'string') {
+    throw new Error('Invalid split generation response');
+  }
+  return toCamelCase(data) as SplitGenerationOperation;
 }
 
 // ==========================================
@@ -601,6 +703,96 @@ export async function getFindings(datasetId: string): Promise<PersistedFinding[]
     throw new Error('Invalid findings response: expected an array');
   }
   return data.map(mapPersistedFinding);
+}
+
+export async function getFindingsPage(
+  datasetId: string,
+  filters: FindingPageFilters = {}
+): Promise<DatasetFindingPage> {
+  const query = new URLSearchParams();
+  if (filters.skip !== undefined) query.set('skip', String(filters.skip));
+  if (filters.limit !== undefined) query.set('limit', String(filters.limit));
+  if (filters.search?.trim()) query.set('search', filters.search.trim());
+  if (filters.findingType) query.set('finding_type', filters.findingType);
+  if (filters.severity) query.set('severity', filters.severity);
+  if (filters.status) query.set('status', filters.status);
+
+  const suffix = query.size ? `?${query.toString()}` : '';
+  const response = await apiFetch(
+    `${getApiBaseUrl()}/datasets/${encodeURIComponent(datasetId)}/findings/page${suffix}`
+  );
+  if (!response.ok) {
+    throw new Error(`Failed to fetch findings page: ${response.status}`);
+  }
+  const raw: unknown = await response.json();
+  if (!isRecord(raw) || !Array.isArray(raw.items)) {
+    throw new Error('Invalid findings page response');
+  }
+  const mapCounts = (value: unknown): DatasetFindingPage['datasetSummary'] => {
+    if (!isRecord(value)) throw new Error('Invalid findings summary response');
+    const statusCounts = value.status_counts;
+    const detectorCounts = value.detector_counts;
+    if (!isRecord(statusCounts) || !isRecord(detectorCounts)) {
+      throw new Error('Invalid findings summary count maps');
+    }
+    const requiredCount = (field: string): number => {
+      const count = value[field];
+      if (typeof count !== 'number' || !Number.isFinite(count) || count < 0) {
+        throw new Error(`Invalid findings summary field: ${field}`);
+      }
+      return count;
+    };
+    const countMap = (source: Record<string, unknown>) =>
+      Object.fromEntries(
+        Object.entries(source).filter((entry): entry is [string, number] =>
+          typeof entry[1] === 'number' && Number.isFinite(entry[1]) && entry[1] >= 0
+        )
+      );
+    return {
+      total: requiredCount('total'),
+      open: requiredCount('open'),
+      resolved: requiredCount('resolved'),
+      low: requiredCount('low'),
+      medium: requiredCount('medium'),
+      high: requiredCount('high'),
+      otherSeverity: requiredCount('other_severity'),
+      statusCounts: countMap(statusCounts),
+      detectorCounts: countMap(detectorCounts),
+    };
+  };
+  const datasetSummary = mapCounts(raw.dataset_summary);
+  return {
+    items: raw.items.map(mapPersistedFinding),
+    total: typeof raw.total === 'number' ? raw.total : 0,
+    skip: typeof raw.skip === 'number' ? raw.skip : 0,
+    limit: typeof raw.limit === 'number' ? raw.limit : 25,
+    datasetSummary,
+    matchingSummary: mapCounts(raw.matching_summary),
+    ...(isRecord(raw.detector_summary)
+      ? { detectorSummary: mapCounts(raw.detector_summary) }
+      : {}),
+  };
+}
+
+export async function getColumnRecommendations(
+  datasetId: string
+): Promise<ColumnRecommendationsResponse> {
+  const response = await apiFetch(
+    `${getApiBaseUrl()}/datasets/${encodeURIComponent(datasetId)}/column-recommendations`
+  );
+  if (!response.ok) {
+    throw await readApiError(response, 'Could not load column recommendations');
+  }
+  const raw: unknown = await response.json();
+  if (!isRecord(raw) || !isRecord(raw.roles)) {
+    throw new Error('Invalid column recommendations response');
+  }
+  const mapped = toCamelCase(raw) as ColumnRecommendationsResponse;
+  const requiredRoles = ['target', 'entity', 'split', 'timestamp'] as const;
+  if (requiredRoles.some((role) => !isRecord(mapped.roles[role]))) {
+    throw new Error('Column recommendations response is missing a detector role');
+  }
+  return mapped;
 }
 
 export async function getFindingById(findingId: string): Promise<PersistedFinding | null> {
@@ -670,11 +862,18 @@ function mapCombinedRepairMetadata(value: unknown): CombinedRepairMetadata | nul
     }
     return candidate;
   };
-  if (!Array.isArray(value.skipped_findings)) {
-    throw new Error('Invalid operation response: operation_metadata.skipped_findings must be an array');
-  }
-
-  const skippedFindings = value.skipped_findings.map((item) => {
+  const optionalStringArray = (field: string): string[] | undefined => {
+    if (value[field] === undefined || value[field] === null) return undefined;
+    return stringArray(value[field], field);
+  };
+  const optionalCount = (field: string): number | undefined => {
+    if (value[field] === undefined || value[field] === null) return undefined;
+    return count(value[field], field);
+  };
+  const rawSkippedFindings = Array.isArray(value.skipped_findings)
+    ? value.skipped_findings
+    : [];
+  const skippedFindings = rawSkippedFindings.map((item) => {
     if (
       !isRecord(item) ||
       typeof item.finding_id !== 'string' ||
@@ -684,14 +883,35 @@ function mapCombinedRepairMetadata(value: unknown): CombinedRepairMetadata | nul
     }
     return { findingId: item.finding_id, reason: item.reason };
   });
+  const selectedFindingIds = optionalStringArray('selected_finding_ids');
+  const appliedFindingIds = optionalStringArray('applied_finding_ids');
+  const originalRowCount = optionalCount('original_row_count');
+  const finalRowCount = optionalCount('final_row_count');
+  const duplicateRowsRemoved = optionalCount('duplicate_rows_removed');
 
   return {
-    selectedFindingIds: stringArray(value.selected_finding_ids, 'selected_finding_ids'),
-    appliedFindingIds: stringArray(value.applied_finding_ids, 'applied_finding_ids'),
+    ...(selectedFindingIds !== undefined ? { selectedFindingIds } : {}),
+    ...(appliedFindingIds !== undefined ? { appliedFindingIds } : {}),
     skippedFindings,
-    originalRowCount: count(value.original_row_count, 'original_row_count'),
-    finalRowCount: count(value.final_row_count, 'final_row_count'),
-    duplicateRowsRemoved: count(value.duplicate_rows_removed, 'duplicate_rows_removed'),
+    skippedFindingsRecorded:
+      typeof value.skipped_findings_recorded === 'boolean'
+        ? value.skipped_findings_recorded
+        : Array.isArray(value.skipped_findings),
+    ...(originalRowCount !== undefined ? { originalRowCount } : {}),
+    ...(finalRowCount !== undefined ? { finalRowCount } : {}),
+    ...(duplicateRowsRemoved !== undefined ? { duplicateRowsRemoved } : {}),
+    ...(Array.isArray(value.evidence_reference_finding_ids)
+      ? { evidenceReferenceFindingIds: stringArray(value.evidence_reference_finding_ids, 'evidence_reference_finding_ids') }
+      : {}),
+    ...(typeof value.repair_strategy === 'string'
+      ? { repairStrategy: value.repair_strategy }
+      : {}),
+    ...(typeof value.verification_status === 'string'
+      ? { verificationStatus: value.verification_status }
+      : {}),
+    ...(isRecord(value.verification)
+      ? { verification: value.verification }
+      : {}),
   };
 }
 
@@ -759,12 +979,233 @@ export async function getDatasetOperationHistory(
   return data.map(mapDatasetOperationRecord);
 }
 
-export async function generateCombinedCleanedDataset(
+function mapRemediationPlanRecord(value: unknown): RemediationPlanRecord {
+  if (!isRecord(value)) throw new Error('Invalid remediation-plan response');
+  const mapped = toCamelCase(value) as Partial<RemediationPlanRecord>;
+  if (
+    typeof mapped.id !== 'string' ||
+    typeof mapped.datasetId !== 'string' ||
+    typeof mapped.operationType !== 'string' ||
+    typeof mapped.status !== 'string' ||
+    !isRecord(mapped.plan) ||
+    typeof mapped.plan.planId !== 'string' ||
+    typeof mapped.plan.previewDigest !== 'string' ||
+    typeof mapped.plan.originalFileSha256 !== 'string' ||
+    typeof mapped.plan.originalRowCount !== 'number' ||
+    typeof mapped.plan.expectedFinalRowCount !== 'number' ||
+    !Array.isArray(mapped.plan.actions) ||
+    !Array.isArray(mapped.plan.affectedSourceRowPositionsPreview) ||
+    !Array.isArray(mapped.plan.selectedFindingIdsPreview) ||
+    !Array.isArray(mapped.plan.skippedFindings)
+  ) {
+    throw new Error('Invalid remediation-plan response fields');
+  }
+  return mapped as RemediationPlanRecord;
+}
+
+export async function previewRemediationPlan(
+  datasetId: string,
+  actions: RemediationActionRequest[]
+): Promise<RemediationPlanRecord> {
+  if (!actions.length) throw new Error('Select at least one remediation action.');
+  const response = await apiFetch(
+    `${getApiBaseUrl()}/datasets/${encodeURIComponent(datasetId)}/remediation-plans/preview`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ actions }),
+    }
+  );
+  if (!response.ok) {
+    throw await readApiError(response, 'Could not create remediation preview');
+  }
+  return mapRemediationPlanRecord(await response.json());
+}
+
+export async function executeRemediationPlan(
+  datasetId: string,
+  planId: string,
+  previewToken: string,
+  confirmed: boolean
+): Promise<RemediationPlanRecord> {
+  if (!previewToken.trim() || confirmed !== true) {
+    throw new Error('A current preview token and explicit confirmation are required.');
+  }
+  const response = await apiFetch(
+    `${getApiBaseUrl()}/datasets/${encodeURIComponent(datasetId)}/remediation-plans/${encodeURIComponent(planId)}/execute`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ preview_token: previewToken, confirmed }),
+    }
+  );
+  if (!response.ok) {
+    throw await readApiError(response, 'Could not execute confirmed remediation');
+  }
+  return mapRemediationPlanRecord(await response.json());
+}
+
+export async function cancelRemediationPlan(
+  datasetId: string,
+  planId: string,
+  reason?: string
+): Promise<RemediationPlanRecord> {
+  const response = await apiFetch(
+    `${getApiBaseUrl()}/datasets/${encodeURIComponent(datasetId)}/remediation-plans/${encodeURIComponent(planId)}/cancel`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason: reason ?? null }),
+    }
+  );
+  if (!response.ok) {
+    throw await readApiError(response, 'Could not cancel remediation preview');
+  }
+  return mapRemediationPlanRecord(await response.json());
+}
+
+export async function getRemediationPlans(
+  datasetId: string,
+  options: { skip?: number; limit?: number } = {}
+): Promise<RemediationPlanPage> {
+  const query = new URLSearchParams();
+  if (options.skip !== undefined) query.set('skip', String(options.skip));
+  if (options.limit !== undefined) query.set('limit', String(options.limit));
+  const suffix = query.size ? `?${query.toString()}` : '';
+  const response = await apiFetch(
+    `${getApiBaseUrl()}/datasets/${encodeURIComponent(datasetId)}/remediation-plans${suffix}`
+  );
+  if (!response.ok) throw await readApiError(response, 'Could not load remediation history');
+  const raw: unknown = await response.json();
+  if (!isRecord(raw) || !Array.isArray(raw.items)) {
+    throw new Error('Invalid remediation-plan history response');
+  }
+  const mapped = toCamelCase(raw) as RemediationPlanPage;
+  return { ...mapped, items: raw.items.map(mapRemediationPlanRecord) };
+}
+
+export async function previewCombinedCleanedDataset(
   datasetId: string,
   selectedFindingIds: string[]
+): Promise<CombinedRepairPreview> {
+  if (selectedFindingIds.length === 0) {
+    throw new Error('Select at least one eligible exact-duplicate finding.');
+  }
+  const response = await apiFetch(
+    `${getApiBaseUrl()}/datasets/${encodeURIComponent(datasetId)}/repairs/combined/preview`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ selected_finding_ids: selectedFindingIds }),
+    }
+  );
+  if (!response.ok) {
+    let detail = '';
+    try {
+      const body: unknown = await response.json();
+      if (isRecord(body) && typeof body.detail === 'string') detail = `: ${body.detail}`;
+    } catch {
+      // Use the HTTP status if the response is not JSON.
+    }
+    throw new Error(`Failed to preview combined cleaning (${response.status})${detail}`);
+  }
+
+  const body: unknown = await response.json();
+  if (
+    !isRecord(body) ||
+    typeof body.dataset_id !== 'string' ||
+    typeof body.input_file_sha256 !== 'string' ||
+    !Array.isArray(body.selected_finding_ids) ||
+    !Array.isArray(body.applied_finding_ids) ||
+    !Array.isArray(body.skipped_findings) ||
+    !['preview', 'not_eligible'].includes(String(body.status)) ||
+    !(body.preview_token === null || typeof body.preview_token === 'string')
+  ) {
+    throw new Error('Invalid combined-cleaning preview response');
+  }
+  const count = (value: unknown, name: string): number => {
+    if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+      throw new Error(`Invalid combined-cleaning preview: ${name} must be a non-negative integer`);
+    }
+    return value;
+  };
+  const parseStringArray = (value: unknown, name: string): string[] => {
+    if (!Array.isArray(value) || !value.every((item) => typeof item === 'string')) {
+      throw new Error(`Invalid combined-cleaning preview: ${name} must be a string array`);
+    }
+    return value;
+  };
+  const parseOptionalRowIndices = (): number[] | undefined => {
+    if (body.affected_row_indices_preview === undefined) return undefined;
+    if (
+      !Array.isArray(body.affected_row_indices_preview) ||
+      !body.affected_row_indices_preview.every(
+        (item) => typeof item === 'number' && Number.isInteger(item) && item >= 0
+      )
+    ) {
+      throw new Error('Invalid combined-cleaning preview: affected row references are malformed');
+    }
+    return body.affected_row_indices_preview;
+  };
+  const parseOptionalCount = (field: string): number | undefined => {
+    if (body[field] === undefined) return undefined;
+    return count(body[field], field);
+  };
+  const parseOptionalBoolean = (field: string): boolean | undefined => {
+    if (body[field] === undefined) return undefined;
+    if (typeof body[field] !== 'boolean') {
+      throw new Error(`Invalid combined-cleaning preview: ${field} must be a boolean`);
+    }
+    return body[field];
+  };
+  const parseOptionalDigest = (field: string): string | undefined => {
+    if (body[field] === undefined) return undefined;
+    if (typeof body[field] !== 'string' || !/^[a-f0-9]{64}$/i.test(body[field])) {
+      throw new Error(`Invalid combined-cleaning preview: ${field} must be a SHA-256 digest`);
+    }
+    return body[field];
+  };
+  const skippedFindings = body.skipped_findings.map((item) => {
+    if (!isRecord(item) || typeof item.finding_id !== 'string' || typeof item.reason !== 'string') {
+      throw new Error('Invalid combined-cleaning preview: skipped finding is malformed');
+    }
+    return { findingId: item.finding_id, reason: item.reason };
+  });
+  const affectedRowIndicesPreview = parseOptionalRowIndices();
+  const affectedRowIndicesCount = parseOptionalCount('affected_row_indices_count');
+  const affectedRowIndicesTruncated = parseOptionalBoolean('affected_row_indices_truncated');
+  const affectedRowIndicesSha256 = parseOptionalDigest('affected_row_indices_sha256');
+  return {
+    datasetId: body.dataset_id,
+    inputFileSha256: body.input_file_sha256,
+    selectedFindingIds: parseStringArray(body.selected_finding_ids, 'selected_finding_ids'),
+    appliedFindingIds: parseStringArray(body.applied_finding_ids, 'applied_finding_ids'),
+    skippedFindings,
+    originalRowCount: count(body.original_row_count, 'original_row_count'),
+    finalRowCount: count(body.final_row_count, 'final_row_count'),
+    duplicateRowsRemoved: count(body.duplicate_rows_removed, 'duplicate_rows_removed'),
+    ...(affectedRowIndicesPreview !== undefined ? { affectedRowIndicesPreview } : {}),
+    ...(affectedRowIndicesCount !== undefined ? { affectedRowIndicesCount } : {}),
+    ...(affectedRowIndicesTruncated !== undefined ? { affectedRowIndicesTruncated } : {}),
+    ...(affectedRowIndicesSha256 !== undefined ? { affectedRowIndicesSha256 } : {}),
+    operationType: typeof body.operation_type === 'string' ? body.operation_type : 'combined_repair_preview',
+    status: body.status as CombinedRepairPreview['status'],
+    previewToken: body.preview_token,
+    explanation: typeof body.explanation === 'string' ? body.explanation : 'Preview explanation unavailable.',
+  };
+}
+
+export async function generateCombinedCleanedDataset(
+  datasetId: string,
+  selectedFindingIds: string[],
+  previewToken: string,
+  confirmed: boolean
 ): Promise<DatasetOperationRecord> {
   if (selectedFindingIds.length === 0) {
     throw new Error('Select at least one eligible exact-duplicate finding.');
+  }
+  if (!previewToken.trim() || confirmed !== true) {
+    throw new Error('A current preview token and explicit confirmation are required.');
   }
 
   const response = await apiFetch(
@@ -772,7 +1213,11 @@ export async function generateCombinedCleanedDataset(
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ selected_finding_ids: selectedFindingIds }),
+      body: JSON.stringify({
+        selected_finding_ids: selectedFindingIds,
+        preview_token: previewToken,
+        confirmed,
+      }),
     }
   );
   if (!response.ok) {
@@ -815,7 +1260,10 @@ export interface OperationOutputDownload {
   filename: string;
 }
 
-function getSafeDownloadFilename(response: Response): string {
+function getSafeDownloadFilename(
+  response: Response,
+  allowedExtensions: readonly string[] = ['csv', 'xlsx']
+): string {
   const disposition = response.headers.get('content-disposition');
   if (!disposition) {
     throw new Error('Download response did not include a filename');
@@ -837,11 +1285,12 @@ function getSafeDownloadFilename(response: Response): string {
     }
   }
 
+  const extensionPattern = allowedExtensions.join('|');
   if (
     filename.includes('..') ||
     filename.includes('/') ||
     filename.includes('\\') ||
-    !/^[A-Za-z0-9][A-Za-z0-9._-]*\.(?:csv|xlsx)$/i.test(filename)
+    !new RegExp(`^[A-Za-z0-9][A-Za-z0-9._-]*\\.(?:${extensionPattern})$`, 'i').test(filename)
   ) {
     throw new Error('Download response included an unsafe filename');
   }
@@ -874,6 +1323,25 @@ export async function downloadOperationOutput(
   };
 }
 
+export type RemediationArtifactType = 'dataset' | 'report' | 'manifest' | 'quarantine';
+
+export async function downloadRemediationArtifact(
+  operationId: string,
+  artifact: RemediationArtifactType
+): Promise<OperationOutputDownload> {
+  const response = await apiFetch(
+    `${getApiBaseUrl()}/operations/${encodeURIComponent(operationId)}/remediation-artifacts/${artifact}`
+  );
+  if (!response.ok) {
+    throw await readApiError(response, 'Could not download remediation artifact');
+  }
+  const filename = getSafeDownloadFilename(response, ['csv', 'json']);
+  if ((artifact === 'manifest') !== filename.toLowerCase().endsWith('.json')) {
+    throw new Error('Remediation artifact response filename does not match its type');
+  }
+  return { blob: await response.blob(), filename };
+}
+
 async function createFindingOperation(
   findingId: string,
   operationType: FindingOperationType
@@ -901,8 +1369,38 @@ export function quarantineFinding(findingId: string): Promise<DatasetOperationRe
 // ==========================================
 
 export async function getImpactAnalysis(datasetId: string): Promise<ImpactAnalysis> {
-  await delay(200);
-  return mockImpactData[datasetId] || mockImpactData['ds-adult-income'];
+  const response = await apiFetch(`${getApiBaseUrl()}/impact-metrics/${encodeURIComponent(datasetId)}`);
+  if (!response.ok) throw await readApiError(response, 'Could not load impact metrics');
+  const payload = await response.json() as {
+    dataset_id: string;
+    metrics: Record<string, number>;
+  };
+  const metrics = [
+    ['Findings', payload.metrics.findings_total ?? 0],
+    ['Open findings', payload.metrics.findings_open ?? 0],
+    ['High severity', payload.metrics.findings_high_severity ?? 0],
+    ['Operations', payload.metrics.operations_total ?? 0],
+    ['Affected rows', payload.metrics.affected_rows ?? 0],
+  ].map(([metric, value]) => ({
+    metric: String(metric),
+    contaminated: Number(value),
+    corrected: Number(value),
+    difference: 0,
+    percentageInflation: 0,
+  }));
+  return {
+    datasetId: payload.dataset_id,
+    modelName: 'No model evaluation configured',
+    taskType: 'Persisted dataset impact metrics',
+    metrics,
+    evaluationInflationSummary: {
+      accuracyDifference: 0,
+      f1Difference: 0,
+      rocAucDifference: 0,
+      statement: 'Model performance was not evaluated by this workflow.',
+      nuance: 'These metrics describe persisted findings and operations only; they do not claim model accuracy or causal impact.',
+    },
+  };
 }
 
 // ==========================================
@@ -910,14 +1408,34 @@ export async function getImpactAnalysis(datasetId: string): Promise<ImpactAnalys
 // ==========================================
 
 export async function getModels(): Promise<Model[]> {
-  await delay(200);
-  return [...modelsStore];
+  const response = await apiFetch(`${getApiBaseUrl()}/model-artifacts`);
+  if (!response.ok) throw await readApiError(response, 'Could not load model artifacts');
+  const artifacts = await response.json() as Array<{
+    id: string; name: string; version?: string | null; original_filename: string;
+    sha256: string; size_bytes: number; created_at?: string;
+  }>;
+  return artifacts.map((artifact) => ({
+    id: artifact.id,
+    name: artifact.name,
+    version: artifact.version ?? 'unversioned',
+    format: 'ONNX',
+    sha256: artifact.sha256,
+    status: 'Not Available',
+    lastVerified: artifact.created_at ?? 'Not verified',
+    architecture: 'Metadata only',
+    parameters: `${artifact.size_bytes} bytes`,
+    framework: artifact.original_filename,
+    uploadedAt: artifact.created_at ?? 'Unavailable',
+    referenceHash: artifact.sha256,
+    fingerprintMatch: false,
+    behaviorDriftScore: 0,
+    referenceBehaviors: [],
+  }));
 }
 
 export async function getModelById(id: string): Promise<Model | null> {
-  await delay(150);
-  const found = modelsStore.find((m) => m.id === id);
-  return found ? { ...found } : null;
+  const models = await getModels();
+  return models.find((model) => model.id === id) ?? null;
 }
 
 export async function verifyModel(modelId: string): Promise<{
@@ -928,47 +1446,74 @@ export async function verifyModel(modelId: string): Promise<{
   behaviorScore: number;
   message: string;
 }> {
-  await delay(500);
-  const model = modelsStore.find((m) => m.id === modelId);
-  if (!model) {
-    return {
-      verified: false,
-      status: 'Not Available',
-      sha256Match: false,
-      fingerprintMatch: false,
-      behaviorScore: 1.0,
-      message: 'Model artifact not found in registry.'
-    };
-  }
-
-  const shaMatch = model.sha256 === model.referenceHash;
-  const status = shaMatch && model.behaviorDriftScore < 0.01 ? 'Verified' : !shaMatch ? 'Changed' : 'Review Required';
-  model.status = status;
-  model.lastVerified = new Date().toISOString().replace('T', ' ').substring(0, 19) + ' UTC';
-
-  activitiesStore = [
-    {
-      id: `act-${Date.now()}`,
-      type: 'model_verified',
-      title: `Model Verification (${model.name})`,
-      description: shaMatch ? 'Cryptographic SHA-256 and golden behavior matched registered spec.' : 'SHA-256 binary hash mismatch detected.',
-      timestamp: 'Just now',
-      targetId: model.id,
-      severity: shaMatch ? 'Low' : 'Critical'
-    },
-    ...activitiesStore
-  ];
-
+  const response = await apiFetch(`${getApiBaseUrl()}/model-artifacts/${encodeURIComponent(modelId)}/verify`);
+  if (!response.ok) throw await readApiError(response, 'Could not verify model artifact');
+  const result = await response.json() as { verified: boolean; sha256?: string; reason?: string };
   return {
-    verified: shaMatch,
-    status,
-    sha256Match: shaMatch,
-    fingerprintMatch: model.fingerprintMatch,
-    behaviorScore: model.behaviorDriftScore,
-    message: shaMatch
-      ? 'Verified under configured checks: File hash and behavioral golden vectors match specification.'
-      : 'Potential issue detected: SHA-256 checksum differed from stored baseline.'
+    verified: result.verified,
+    status: result.verified ? 'Verified' : 'Changed',
+    sha256Match: result.verified,
+    fingerprintMatch: false,
+    behaviorScore: 0,
+    message: result.verified
+      ? 'Artifact SHA-256 matches the persisted trusted hash. No behavioral or inference check was performed.'
+      : `Artifact verification failed${result.reason ? `: ${result.reason}` : '.'}`,
   };
+}
+
+export async function uploadModelArtifact(
+  file: File,
+  name: string,
+  version?: string,
+  metadata?: Record<string, unknown>,
+): Promise<Model> {
+  const body = new FormData();
+  body.append('name', name);
+  if (version) body.append('version', version);
+  if (metadata) body.append('metadata', JSON.stringify(metadata));
+  body.append('file', file);
+  const response = await apiFetch(`${getApiBaseUrl()}/model-artifacts`, { method: 'POST', body });
+  if (!response.ok) throw await readApiError(response, 'Could not upload model artifact');
+  const artifact = await response.json() as { id: string; name: string; version?: string; original_filename: string; sha256: string; size_bytes: number };
+  return {
+    id: artifact.id, name: artifact.name, version: artifact.version ?? 'unversioned',
+    format: 'ONNX', sha256: artifact.sha256, status: 'Not Available',
+    lastVerified: 'Not verified', architecture: 'Metadata only',
+    parameters: `${artifact.size_bytes} bytes`, framework: artifact.original_filename,
+    uploadedAt: 'Just now', referenceHash: artifact.sha256, fingerprintMatch: false,
+    behaviorDriftScore: 0, referenceBehaviors: [],
+  };
+}
+
+export async function downloadModelArtifact(id: string): Promise<void> {
+  const response = await apiFetch(`${getApiBaseUrl()}/model-artifacts/${encodeURIComponent(id)}/download`);
+  if (!response.ok) throw await readApiError(response, 'Could not download model artifact');
+  const url = `${getApiBaseUrl()}/model-artifacts/${encodeURIComponent(id)}/download`;
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.style.display = 'none';
+  document.body.appendChild(anchor);
+  anchor.download = response.headers.get('content-disposition')?.match(/filename="([^"]+)"/)?.[1] ?? `${id}.artifact`;
+  anchor.click();
+  anchor.remove();
+}
+
+export async function createProvenanceRecord(datasetId: string, metadata: Record<string, unknown>) {
+  const response = await apiFetch(`${getApiBaseUrl()}/provenance`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ dataset_id: datasetId, metadata }),
+  });
+  if (!response.ok) throw await readApiError(response, 'Could not create provenance record');
+  return response.json();
+}
+
+export async function createDistributionComparison(referenceDatasetId: string, comparisonDatasetId: string) {
+  const response = await apiFetch(`${getApiBaseUrl()}/distribution-comparisons`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reference_dataset_id: referenceDatasetId, comparison_dataset_id: comparisonDatasetId }),
+  });
+  if (!response.ok) throw await readApiError(response, 'Could not compare distributions');
+  return response.json();
 }
 
 // ==========================================
@@ -976,120 +1521,41 @@ export async function verifyModel(modelId: string): Promise<{
 // ==========================================
 
 export async function getInferenceRecords(): Promise<InferenceRecord[]> {
-  await delay(200);
-  return [...inferenceStore];
+  const response = await apiFetch(`${getApiBaseUrl()}/provenance`);
+  if (!response.ok) throw await readApiError(response, 'Could not load provenance records');
+  const records = await response.json() as Array<{ id: string; dataset_id: string; metadata: Record<string, unknown>; created_at?: string; prediction_status: string }>;
+  return records.map((record): InferenceRecord => ({
+    id: record.id,
+    timestamp: record.created_at ?? 'Unavailable',
+    modelId: String(record.metadata.model_id ?? 'not-configured'),
+    modelName: 'Provenance metadata only',
+    inputHash: String(record.metadata.input_hash ?? 'Not supplied'),
+    outputHash: String(record.metadata.output_hash ?? 'Not supplied'),
+    configHash: String(record.metadata.config_hash ?? 'Not supplied'),
+    nonce: String(record.metadata.nonce ?? 'Not supplied'),
+    sequenceNumber: Number(record.metadata.sequence_number ?? 0),
+    digitalSignature: String(record.metadata.signature ?? 'Not supplied'),
+    verificationStatus: record.prediction_status === 'Tampered' || record.prediction_status === 'Replay Detected'
+      ? record.prediction_status
+      : 'Metadata persisted',
+    prediction: { label: 'No prediction', confidence: null },
+    inputMetadata: {
+      filename: String(record.metadata.input_filename ?? 'Not supplied'),
+      dimensions: 'Not supplied',
+      sizeKb: 0,
+      preprocessingConfig: String(record.metadata.preprocessing ?? 'Not supplied'),
+    },
+  }));
 }
 
-export async function runInference(payload: {
+export async function runInference(_payload: {
   modelId: string;
   imageOrVectorName: string;
   config: string
 }): Promise<InferenceRecord> {
-  await delay(500);
-  const model = modelsStore.find((m) => m.id === payload.modelId) || modelsStore[0];
-
-  const isCV = payload.imageOrVectorName.includes('.jpg') || payload.imageOrVectorName.includes('.png');
-  const isChest = payload.imageOrVectorName.includes('xray') || model.id.includes('resnet');
-
-  const record: InferenceRecord = {
-    id: `PRV-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`,
-    timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19) + ' UTC',
-    modelId: model.id,
-    modelName: `${model.name} (${model.version})`,
-    inputHash: '7f9a1b2c3d4e5f60718293a4b5c6d7e8f90123456789abcdef0123456789abcd',
-    outputHash: '1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b',
-    configHash: '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
-    nonce: `0x${Math.floor(Math.random() * 0xffffffff).toString(16)}`,
-    sequenceNumber: 1043 + inferenceStore.length,
-    digitalSignature: 'MEQCIDx489f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8AiBy781c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b==',
-    verificationStatus: 'Verified',
-    prediction: isCV ? (isChest ? {
-      label: 'Normal',
-      confidence: 0.978,
-      secondaryClass: 'Bacterial Pneumonia',
-      secondaryConfidence: 0.018,
-      boundingBoxes: [
-        { label: 'Clear Lung Field', box: [18, 20, 30, 52], confidence: 0.95 },
-        { label: 'Clear Lung Field', box: [54, 22, 32, 50], confidence: 0.96 }
-      ]
-    } : {
-      label: 'missing_hole',
-      confidence: 0.942,
-      secondaryClass: 'spurious_copper',
-      secondaryConfidence: 0.045,
-      boundingBoxes: [
-        { label: 'missing_hole', box: [38, 42, 16, 20], confidence: 0.94 }
-      ]
-    }) : {
-      label: '<=50K',
-      confidence: 0.925,
-      secondaryClass: '>50K',
-      secondaryConfidence: 0.075
-    },
-    inputMetadata: {
-      filename: payload.imageOrVectorName,
-      dimensions: isCV ? '1024x1024' : '14 Features',
-      sizeKb: isCV ? 1840 : 1.2,
-      preprocessingConfig: payload.config
-    }
-  };
-
-  inferenceStore = [record, ...inferenceStore];
-  return record;
-}
-
-export async function simulateTampering(recordId: string, modifiedConfidence: number): Promise<InferenceRecord | null> {
-  await delay(300);
-  const rec = inferenceStore.find((r) => r.id === recordId);
-  if (!rec) return null;
-
-  rec.prediction.confidence = modifiedConfidence;
-  rec.verificationStatus = 'Tampered';
-  rec.tamperedFields = ['prediction.confidence', 'digitalSignature'];
-  return { ...rec };
-}
-
-export async function simulateReplay(recordId: string): Promise<InferenceRecord | null> {
-  await delay(300);
-  const rec = inferenceStore.find((r) => r.id === recordId);
-  if (!rec) return null;
-
-  rec.verificationStatus = 'Replay Detected';
-  return { ...rec };
-}
-
-export async function verifyProvenanceRecord(recordId: string): Promise<{
-  verified: boolean;
-  status: 'Verified' | 'Tampered' | 'Replay Detected';
-  details: string;
-}> {
-  await delay(350);
-  const rec = inferenceStore.find((r) => r.id === recordId);
-  if (!rec) {
-    return { verified: false, status: 'Tampered', details: 'Record not found in cryptographic log.' };
-  }
-
-  if (rec.verificationStatus === 'Tampered') {
-    return {
-      verified: false,
-      status: 'Tampered',
-      details: 'TAMPERING DETECTED: The payload hash or output confidence does not match the registered digital signature.'
-    };
-  }
-
-  if (rec.verificationStatus === 'Replay Detected') {
-    return {
-      verified: false,
-      status: 'Replay Detected',
-      details: 'REPLAY DETECTED: Nonce or sequence number has already been retired in previous log epoch.'
-    };
-  }
-
-  return {
-    verified: true,
-    status: 'Verified',
-    details: 'PROVENANCE VERIFIED: Hash chain, sequence number, and digital signature verified under configured checks.'
-  };
+  throw new Error(
+    'Inference execution is not configured. Create a provenance record with verified metadata instead.'
+  );
 }
 
 // ==========================================
@@ -1097,8 +1563,47 @@ export async function verifyProvenanceRecord(recordId: string): Promise<{
 // ==========================================
 
 export async function getDistributionShift(): Promise<DistributionShift> {
-  await delay(250);
-  return { ...mockDistributionShiftData };
+  const response = await apiFetch(`${getApiBaseUrl()}/distribution-comparisons`);
+  if (!response.ok) throw await readApiError(response, 'Could not load distribution comparisons');
+  const records = await response.json() as Array<{
+    id: string;
+    reference_dataset_id: string;
+    comparison_dataset_id: string;
+    metrics: Record<string, { kind: string; psi?: number; distribution_delta?: number; missing_delta: number }>;
+  }>;
+  const record = records[0];
+  if (!record) throw new Error('No persisted distribution comparison is available yet.');
+  const featureShifts = Object.entries(record.metrics).map(([featureName, metric]) => {
+    const driftScore = metric.kind === 'numeric' ? metric.psi : metric.distribution_delta;
+    if (typeof driftScore !== 'number' || !Number.isFinite(driftScore)) return null;
+    return {
+      featureName,
+      driftScore,
+      metricKind: metric.kind === 'numeric' ? 'PSI' as const : 'Distribution delta' as const,
+      threshold: metric.kind === 'numeric' ? 0.2 : 0.1,
+      status: driftScore >= (metric.kind === 'numeric' ? 0.2 : 0.1) ? 'Shift Detected' as const : 'Nominal' as const,
+    };
+  }).filter((item): item is NonNullable<typeof item> => item !== null);
+  const numericPsi = featureShifts.filter((item) => item.metricKind === 'PSI');
+  const psiScore = numericPsi.length
+    ? numericPsi.reduce((sum, item) => sum + item.driftScore, 0) / numericPsi.length
+    : null;
+  return {
+    id: record.id,
+    referenceDatasetId: record.reference_dataset_id,
+    currentDatasetId: record.comparison_dataset_id,
+    overallShiftDetected: featureShifts.some((item) => item.status === 'Shift Detected'),
+    shiftLevel: featureShifts.some((item) => item.status === 'Shift Detected')
+      ? 'Review Required'
+      : featureShifts.length
+        ? 'No Significant Shift'
+        : 'Potential Shift',
+    psiScore,
+    wassersteinDistance: null,
+    oodRate: null,
+    classBalanceShift: [],
+    featureShifts,
+  };
 }
 
 // ==========================================
@@ -1106,79 +1611,145 @@ export async function getDistributionShift(): Promise<DistributionShift> {
 // ==========================================
 
 export async function getReports(): Promise<AssuranceReport[]> {
-  await delay(200);
-  return [...reportsStore];
+  const response = await apiFetch(`${getApiBaseUrl()}/reports`);
+  if (!response.ok) throw await readApiError(response, 'Could not load reports');
+  const records = await response.json() as Array<{
+    id: string; title: string; created_at?: string; dataset_id?: string | null;
+    content?: unknown;
+  }>;
+  return records.map(mapAssuranceReport);
+}
+
+function mapAssuranceReport(record: {
+  id: string;
+  title: string;
+  created_at?: string;
+  dataset_id?: string | null;
+  content?: unknown;
+}): AssuranceReport {
+  const rawContent =
+    record.content && typeof record.content === 'object'
+      ? record.content as Record<string, unknown>
+      : {};
+  const datasets: PersistedReportDataset[] = Array.isArray(rawContent.datasets)
+    ? rawContent.datasets
+        .filter((value): value is Record<string, unknown> => (
+          value !== null && typeof value === 'object' && !Array.isArray(value)
+        ))
+        .map((dataset) => ({
+          id: typeof dataset.id === 'string' ? dataset.id : '',
+          name: typeof dataset.name === 'string' ? dataset.name : 'Dataset name unavailable',
+          format: typeof dataset.format === 'string' ? dataset.format : 'Format unavailable',
+          sha256: typeof dataset.sha256 === 'string' ? dataset.sha256 : null,
+        }))
+    : [];
+  const impactKeys: Array<keyof PersistedReportImpact> = [
+    'findings_total',
+    'findings_open',
+    'findings_high_severity',
+    'operations_total',
+    'operations_completed',
+    'affected_rows',
+  ];
+  const impact: PersistedReportImpact[] = Array.isArray(rawContent.impact)
+    ? rawContent.impact.map((value) => {
+        const rawMetrics =
+          value && typeof value === 'object' && !Array.isArray(value)
+            ? value as Record<string, unknown>
+            : {};
+        return Object.fromEntries(
+          impactKeys.flatMap((key) => (
+            typeof rawMetrics[key] === 'number' && Number.isFinite(rawMetrics[key])
+              ? [[key, rawMetrics[key] as number]]
+              : []
+          ))
+        ) as PersistedReportImpact;
+      })
+    : [];
+  const persistedContent: PersistedReportContent = { datasets, impact };
+  const firstDataset = datasets[0];
+  const datasetName = firstDataset
+    ? `${firstDataset.name} (${firstDataset.format})`
+    : datasets.length > 1
+      ? `${datasets.length} persisted datasets`
+      : 'Dataset details unavailable';
+
+  return {
+    id: record.id,
+    title: record.title,
+    datasetId: record.dataset_id ?? firstDataset?.id ?? '',
+    datasetName,
+    modelId: '',
+    modelName: 'No model evaluation configured',
+    createdAt: record.created_at ?? 'Unavailable',
+    assessmentStatus: 'NOT ASSESSED',
+    disposition: 'NOT ASSESSED',
+    confidenceScore: null,
+    projectDefinedRisk: 'NOT ASSESSED',
+    executiveSummary:
+      `Persisted snapshot containing ${datasets.length} dataset record(s) and ${impact.length} impact metric record(s). ` +
+      'It does not perform model evaluation or assign an assurance rating.',
+    findingsCount: { critical: null, high: null, medium: null, low: null },
+    persistedContent,
+    sections: {
+      datasetIntegrity: 'The persisted dataset names, formats, identifiers, and available file hashes are listed below.',
+      leakageFindings: 'Finding totals below are persisted counts. Severity breakdowns and full finding evidence are not included in this report snapshot.',
+      datasetAnomalies: 'Not assessed by this report generator.',
+      modelIntegrity: 'No model-integrity assessment is included.',
+      inferenceProvenance: 'No inference or provenance assessment is included.',
+      distributionShift: 'No distribution comparison is included in this report snapshot.',
+      performanceImpact: 'No model performance evaluation was performed.',
+      evidence: 'This report contains dataset metadata and persisted impact counts, not full finding evidence.',
+      riskAssessment: 'No risk score or confidence assessment was calculated.',
+      limitations: [
+        'This snapshot does not execute model evaluation or inference.',
+        'Finding severity breakdowns and full finding evidence are not included.',
+        'No automated risk score, confidence value, or disposition is assigned.',
+      ],
+      recommendedDisposition: 'Review the persisted dataset, finding, and operation records; no automated disposition is provided.',
+    },
+  };
 }
 
 export async function getReportById(id: string): Promise<AssuranceReport | null> {
-  await delay(200);
-  const rep = reportsStore.find((r) => r.id === id);
-  return rep ? { ...rep } : null;
+  const reports = await getReports();
+  return reports.find((report) => report.id === id) ?? null;
 }
 
-export async function generateAssuranceReport(datasetId: string, modelId: string): Promise<AssuranceReport> {
-  await delay(700);
-  const ds = datasetsStore.find((d) => d.id === datasetId) || datasetsStore[0];
-  const mdl = modelsStore.find((m) => m.id === modelId) || modelsStore[0];
-
-  const newReport: AssuranceReport = {
-    id: `REP-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`,
-    title: `${ds.name} Assurance Report`,
-    datasetId: ds.id,
-    datasetName: `${ds.name} (${ds.format})`,
-    modelId: mdl.id,
-    modelName: `${mdl.name} (${mdl.version})`,
-    createdAt: new Date().toISOString().replace('T', ' ').substring(0, 19) + ' UTC',
-    assessmentStatus: 'REVIEW REQUIRED',
-    disposition: 'REVIEW',
-    confidenceScore: 89,
-    projectDefinedRisk: 'HIGH',
-    findingsCount: {
-      critical: 24,
-      high: 142,
-      medium: 18,
-      low: 4
-    },
-    executiveSummary: `Automated assurance audit conducted on ${ds.name} using model ${mdl.name}. Detected leakage patterns across validation splits resulting in observed evaluation inflation.`,
-    sections: {
-      datasetIntegrity: `${ds.sampleCount} records evaluated against duplicate, entity, and temporal integrity vectors.`,
-      leakageFindings: 'Multiple cross-split duplicate pairs identified along with global preprocessing leakage.',
-      datasetAnomalies: 'Label consistency checks flagged potential label disagreement across identical feature profiles.',
-      modelIntegrity: `Model ${mdl.name} verified against SHA-256 fingerprint. Architecture matches stored specification.`,
-      inferenceProvenance: 'Inference signing verified HMAC and sequence ordering under configured criteria.',
-      distributionShift: 'Distribution analysis shows moderate shift across numerical feature distributions.',
-      performanceImpact: 'Observed evaluation inflation of +7.4% between contaminated baseline and corrected evaluation.',
-      evidence: 'Appendix contains complete list of flagged hash pairs and statistical divergence scores.',
-      riskAssessment: 'Project-defined risk assessed as HIGH due to observed evaluation discrepancy.',
-      limitations: [
-        'Checks bounded by configured threshold parameters (similarity >= 95%).',
-        'Not a guarantee against undetectable covert adversarial perturbations.'
-      ],
-      recommendedDisposition: 'REVIEW: Quarantine flagged entries and retrain using isolated validation pipeline.'
-    }
+export async function generateAssuranceReport(datasetId: string, _modelId: string): Promise<AssuranceReport> {
+  const response = await apiFetch(`${getApiBaseUrl()}/reports`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ dataset_id: datasetId, title: 'DataLeakGuard persisted report' }),
+  });
+  if (!response.ok) throw await readApiError(response, 'Could not generate report');
+  const created = await response.json() as {
+    id: string;
+    title: string;
+    created_at?: string;
+    dataset_id?: string | null;
+    content?: unknown;
   };
-
-  reportsStore = [newReport, ...reportsStore];
-  activitiesStore = [
-    {
-      id: `act-${Date.now()}`,
-      type: 'report_generated',
-      title: 'Assurance Report Generated',
-      description: `Compiled assurance report ${newReport.id} for ${ds.name}.`,
-      timestamp: 'Just now',
-      targetId: newReport.id,
-      severity: 'Medium'
-    },
-    ...activitiesStore
-  ];
-
-  return newReport;
+  return mapAssuranceReport(created);
 }
 
 export async function deleteReport(id: string): Promise<boolean> {
-  await delay(200);
-  reportsStore = reportsStore.filter((r) => r.id !== id);
+  const response = await apiFetch(`${getApiBaseUrl()}/reports/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  if (!response.ok) throw await readApiError(response, 'Could not delete report');
   return true;
+}
+
+export async function downloadReport(id: string, format: 'json' | 'html'): Promise<void> {
+  const response = await apiFetch(`${getApiBaseUrl()}/reports/${encodeURIComponent(id)}/download?format=${format}`);
+  if (!response.ok) throw await readApiError(response, 'Could not download report');
+  const url = `${getApiBaseUrl()}/reports/${encodeURIComponent(id)}/download?format=${format}`;
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.style.display = 'none';
+  document.body.appendChild(anchor);
+  anchor.download = `${id}-report.${format}`;
+  anchor.click();
+  anchor.remove();
 }
 
 // ==========================================

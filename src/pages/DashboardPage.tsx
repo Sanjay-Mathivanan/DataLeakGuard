@@ -84,8 +84,8 @@ export const DashboardPage: React.FC = () => {
         </section>
         <section className="bg-white border border-slate-200 rounded-xl p-5 shadow-xs">
           <h2 className="text-sm font-semibold text-slate-900">Model and report metrics</h2>
-          <p className="mt-2 text-xs text-slate-600">Models: unavailable — {stats.models.reason || 'no persisted model registry'}</p>
-          <p className="mt-1 text-xs text-slate-600">Reports: unavailable — {stats.reports.reason || 'no persisted report registry'}</p>
+          <p className="mt-2 text-xs text-slate-600">Registered model artifacts: {stats.models.available ? stats.models.count : `unavailable — ${stats.models.reason || 'not configured'}`}</p>
+          <p className="mt-1 text-xs text-slate-600">Persisted reports: {stats.reports.available ? stats.reports.count : `unavailable — ${stats.reports.reason || 'not configured'}`}</p>
         </section>
       </div>
 

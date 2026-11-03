@@ -1,10 +1,28 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { AlertTriangle, ArrowRight, CheckCircle2, Clock, Play, RotateCcw } from 'lucide-react';
-import { buildAnalysisStages, getDatasetById, runDatasetAnalysis } from '../services/api';
-import { AnalysisResult, Dataset } from '../types';
+import { AlertTriangle, CheckCircle2, Clock, Play, RotateCcw } from 'lucide-react';
+import {
+  buildAnalysisStages,
+  generateDatasetSplit,
+  getColumnRecommendations,
+  getDatasetById,
+  runDatasetAnalysis,
+} from '../services/api';
+import {
+  AnalysisResult,
+  ColumnRecommendationsResponse,
+  Dataset,
+  DetectorColumnRole,
+  SplitGenerationOperation,
+} from '../types';
 import { useToast } from '../context/ToastContext';
 import { getDatasetWorkflowPath } from '../services/datasetNavigation';
+import { GroupedFindings } from '../components/leakage/GroupedFindings';
+import { SearchableColumnSelector } from '../components/analysis/SearchableColumnSelector';
+import { ColumnRecommendationsPanel } from '../components/analysis/ColumnRecommendationsPanel';
+import { SplitStrategy, SplitStrategyPanel } from '../components/analysis/SplitStrategyPanel';
+import { findPotentialTargetDerivedFeatures } from '../components/analysis/targetFeatureWarnings';
+import { loadConfirmedAnalysisSetup } from './AnalysisSetupPage';
 
 type ColumnSelection = 'targetColumn' | 'entityColumn' | 'splitColumn' | 'timeColumn';
 
@@ -49,9 +67,21 @@ export const AnalysisPage: React.FC = () => {
   const navigate = useNavigate();
   const { success, error } = useToast();
   const [dataset, setDataset] = useState<Dataset | null>(null);
+  const [recommendations, setRecommendations] = useState<ColumnRecommendationsResponse | null>(null);
+  const [recommendationsLoading, setRecommendationsLoading] = useState(false);
+  const [recommendationsError, setRecommendationsError] = useState<string | null>(null);
   const [isLoadingDataset, setIsLoadingDataset] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [isRunning, setIsRunning] = useState(false);
+  const [splitStrategy, setSplitStrategy] = useState<SplitStrategy>('none');
+  const [splitRatio, setSplitRatio] = useState(0.2);
+  const [splitSeed, setSplitSeed] = useState(42);
+  const [splitGenerationConfirmed, setSplitGenerationConfirmed] = useState(false);
+  const [isGeneratingSplit, setIsGeneratingSplit] = useState(false);
+  const [splitGenerationError, setSplitGenerationError] = useState<string | null>(null);
+  const [splitOperation, setSplitOperation] = useState<SplitGenerationOperation | null>(null);
+  const [configurationConfirmed, setConfigurationConfirmed] = useState(false);
+  const [setupOrigin, setSetupOrigin] = useState(false);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null);
   const [attemptedOptions, setAttemptedOptions] = useState<{
@@ -69,17 +99,30 @@ export const AnalysisPage: React.FC = () => {
 
   useEffect(() => {
     let active = true;
+    const setup = id ? loadConfirmedAnalysisSetup(id) : null;
     setIsLoadingDataset(true);
     setLoadError(null);
     setDataset(null);
+    setRecommendations(null);
+    setRecommendationsLoading(false);
+    setRecommendationsError(null);
     setAnalysisResult(null);
     setAnalysisError(null);
     setAttemptedOptions(null);
+    setConfigurationConfirmed(setup?.confirmed === true);
+    setSetupOrigin(setup?.confirmed === true);
+    setSplitStrategy(setup?.splitStrategy ?? 'none');
+    setSplitRatio(setup?.splitRatio ?? 0.2);
+    setSplitSeed(setup?.splitSeed ?? 42);
+    setSplitGenerationConfirmed(false);
+    setIsGeneratingSplit(false);
+    setSplitGenerationError(null);
+    setSplitOperation(setup?.splitOperation ?? null);
     setSelection({
-      targetColumn: '',
-      entityColumn: '',
-      splitColumn: '',
-      timeColumn: ''
+      targetColumn: setup?.targetColumn ?? '',
+      entityColumn: setup?.entityColumn ?? '',
+      splitColumn: setup?.splitColumn ?? '',
+      timeColumn: setup?.timeColumn ?? '',
     });
 
     if (!id) {
@@ -95,6 +138,21 @@ export const AnalysisPage: React.FC = () => {
           setLoadError('Dataset not found.');
         } else {
           setDataset(result);
+          setRecommendationsLoading(true);
+          getColumnRecommendations(id)
+            .then((response) => {
+              if (active) setRecommendations(response);
+            })
+            .catch((err: unknown) => {
+              if (active) {
+                setRecommendationsError(
+                  err instanceof Error ? err.message : 'Recommendations are unavailable.'
+                );
+              }
+            })
+            .finally(() => {
+              if (active) setRecommendationsLoading(false);
+            });
         }
       })
       .catch((err: unknown) => {
@@ -109,20 +167,69 @@ export const AnalysisPage: React.FC = () => {
 
   const options = useMemo(() => ({
     ...(selection.entityColumn ? { entityColumn: selection.entityColumn } : {}),
-    ...(selection.splitColumn ? { splitColumn: selection.splitColumn } : {}),
+    ...(splitStrategy === 'existing' && selection.splitColumn
+      ? { splitColumn: selection.splitColumn }
+      : {}),
     ...(selection.targetColumn ? { targetColumn: selection.targetColumn } : {}),
-    ...(selection.timeColumn ? { timeColumn: selection.timeColumn } : {})
-  }), [selection]);
+    ...(selection.timeColumn ? { timeColumn: selection.timeColumn } : {}),
+    splitStrategy,
+    ...(splitStrategy === 'generated' && splitOperation
+      ? { splitOperationId: splitOperation.id }
+      : {})
+  }), [selection, splitStrategy, splitOperation]);
 
   const updateSelection = (key: ColumnSelection, value: string) => {
     setSelection((previous) => ({ ...previous, [key]: value }));
+    setConfigurationConfirmed(false);
     setAnalysisResult(null);
     setAnalysisError(null);
     setAttemptedOptions(null);
   };
 
+  const updateSplitStrategy = (value: SplitStrategy) => {
+    setSplitStrategy(value);
+    setSelection((previous) => ({ ...previous, splitColumn: '' }));
+    setSplitOperation(null);
+    setSplitGenerationConfirmed(false);
+    setSplitGenerationError(null);
+    setConfigurationConfirmed(false);
+    setAnalysisResult(null);
+    setAnalysisError(null);
+    setAttemptedOptions(null);
+  };
+
+  const handleGenerateSplit = async () => {
+    if (!id || !splitGenerationConfirmed || isGeneratingSplit) return;
+    setIsGeneratingSplit(true);
+    setSplitGenerationError(null);
+    setSplitOperation(null);
+    setConfigurationConfirmed(false);
+    setAnalysisResult(null);
+    try {
+      const operation = await generateDatasetSplit(id, {
+        testRatio: splitRatio,
+        randomSeed: splitSeed,
+      });
+      setSplitOperation(operation);
+      success(
+        'Split copy generated',
+        `${operation.splitRowCounts.train ?? 0} training rows and ${operation.splitRowCounts.test ?? 0} test rows were written to a separate output.`
+      );
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'The backend could not generate a split copy.';
+      setSplitGenerationError(message);
+      error('Split generation failed', message);
+    } finally {
+      setIsGeneratingSplit(false);
+    }
+  };
+
+  const splitReady = splitStrategy === 'none'
+    || (splitStrategy === 'existing' && Boolean(selection.splitColumn))
+    || (splitStrategy === 'generated' && Boolean(splitOperation?.id));
+
   const startAnalysis = async () => {
-    if (!id || !dataset || isRunning || !isTabular(dataset)) return;
+    if (!id || !dataset || isRunning || !isTabular(dataset) || !configurationConfirmed || !splitReady) return;
     setIsRunning(true);
     setAnalysisError(null);
     setAnalysisResult(null);
@@ -156,6 +263,38 @@ export const AnalysisPage: React.FC = () => {
   ).length;
   const isCompleted = analysisResult !== null && !isRunning;
   const columns = dataset?.columns ?? [];
+  const potentialTargetDerivedFeatures = useMemo(
+    () => findPotentialTargetDerivedFeatures(
+      selection.targetColumn,
+      columns.map((column) => column.name)
+    ),
+    [columns, selection.targetColumn]
+  );
+  const visibleColumnSelectors = columnSelectors.filter(
+    ({ key }) => key !== 'splitColumn' || splitStrategy === 'existing'
+  );
+  const selectableColumns = useMemo(
+    () => columns.map((column) => ({ name: column.name, type: column.type })),
+    [columns]
+  );
+  const recommendationSelection: Record<DetectorColumnRole, string> = {
+    target: selection.targetColumn,
+    entity: selection.entityColumn,
+    split: selection.splitColumn,
+    timestamp: selection.timeColumn,
+  };
+  const applyRecommendation = (role: DetectorColumnRole, column: string) => {
+    const keys: Record<DetectorColumnRole, ColumnSelection> = {
+      target: 'targetColumn',
+      entity: 'entityColumn',
+      split: 'splitColumn',
+      timestamp: 'timeColumn',
+    };
+    if (role === 'split' && splitStrategy !== 'existing') {
+      updateSplitStrategy('existing');
+    }
+    updateSelection(keys[role], column);
+  };
 
   return (
     <div className="max-w-4xl mx-auto space-y-6 animate-in fade-in duration-200">
@@ -171,13 +310,14 @@ export const AnalysisPage: React.FC = () => {
             Configure optional columns for {dataset?.name || id || 'the selected dataset'}. Exact-duplicate detection always runs.
           </p>
         </div>
-        {isCompleted && id && (
-          <button
-            onClick={() => navigate(getDatasetWorkflowPath('findings', id))}
-            className="px-4 py-2 text-xs font-semibold rounded-lg bg-teal-700 hover:bg-teal-800 text-white transition-colors flex items-center gap-2"
-          >
-            View persisted findings <ArrowRight className="w-4 h-4" />
-          </button>
+        {id && (
+          <nav aria-label="Dataset workflow" className="flex flex-wrap gap-2">
+            <button type="button" onClick={() => navigate(`/datasets/${id}`)} className="rounded-md border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700">Dataset</button>
+            <button type="button" onClick={() => navigate(`/analysis-setup/${id}`)} className="rounded-md border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700">Analysis Setup</button>
+            <button type="button" onClick={() => navigate(getDatasetWorkflowPath('findings', id))} className="rounded-md border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700">Findings</button>
+            <button type="button" onClick={() => navigate(`/remediation/${id}`)} className="rounded-md border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700">Remediation Center</button>
+            <button type="button" onClick={() => navigate(`/datasets/${id}?tab=history`)} className="rounded-md border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700">Audit History</button>
+          </nav>
         )}
       </header>
 
@@ -195,6 +335,88 @@ export const AnalysisPage: React.FC = () => {
         </div>
       ) : dataset ? (
         <>
+          <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-xs">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div>
+                <h2 className="text-sm font-semibold text-slate-900">Analysis overview</h2>
+                <p className="mt-1 text-xs text-slate-600">
+                  Dataset: <strong>{dataset.name}</strong> · ID: <span className="font-mono">{dataset.id}</span>
+                </p>
+              </div>
+              {id && (
+                <button
+                  type="button"
+                  onClick={() => navigate(getDatasetWorkflowPath('dataset', id))}
+                  className="text-xs font-semibold text-teal-800 underline underline-offset-2"
+                >
+                  Dataset profile and history
+                </button>
+              )}
+            </div>
+            <dl className="mt-4 grid grid-cols-2 gap-3 text-xs sm:grid-cols-4">
+              <div>
+                <dt className="text-slate-500">Rows</dt>
+                <dd className="mt-1 font-semibold text-slate-900">{dataset.sampleCount ?? 'Not available'}</dd>
+              </div>
+              <div>
+                <dt className="text-slate-500">Columns</dt>
+                <dd className="mt-1 font-semibold text-slate-900">
+                  {dataset.featureCount ?? (columns.length > 0 ? columns.length : 'Not available')}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-slate-500">Persisted status</dt>
+                <dd className="mt-1 font-semibold text-slate-900">{dataset.status || 'Not available'}</dd>
+              </div>
+              <div>
+                <dt className="text-slate-500">Last successful analysis</dt>
+                <dd className="mt-1 font-semibold text-slate-900">
+                  {dataset.lastAnalysis ? new Date(dataset.lastAnalysis).toLocaleString() : 'Not available'}
+                </dd>
+              </div>
+            </dl>
+          </section>
+
+          {setupOrigin ? (
+            <section className="bg-white border border-slate-200 rounded-xl p-5 shadow-xs">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <h2 className="text-sm font-semibold text-slate-900">Confirmed analysis configuration</h2>
+                  <p className="mt-1 text-xs text-slate-600">
+                    These are the exact user-confirmed selections passed to the backend. No recommendation was applied automatically.
+                  </p>
+                </div>
+                {id && (
+                  <button type="button" onClick={() => navigate(`/analysis-setup/${id}`)}
+                    className="rounded-md border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700">
+                    Change configuration
+                  </button>
+                )}
+              </div>
+              <dl className="mt-4 grid gap-x-4 gap-y-2 text-xs sm:grid-cols-2">
+                <dt className="text-slate-500">Target</dt><dd className="break-all font-mono">{selection.targetColumn || 'Not selected'}</dd>
+                <dt className="text-slate-500">Entity</dt><dd className="break-all font-mono">{selection.entityColumn || 'Not selected'}</dd>
+                <dt className="text-slate-500">Timestamp</dt><dd className="break-all font-mono">{selection.timeColumn || 'Not selected'}</dd>
+                <dt className="text-slate-500">Split strategy</dt><dd>{splitStrategy}</dd>
+                <dt className="text-slate-500">Split column</dt><dd className="break-all font-mono">{selection.splitColumn || 'Not selected'}</dd>
+                {splitOperation && <><dt className="text-slate-500">Generated split operation</dt><dd className="break-all font-mono">{splitOperation.id}</dd></>}
+              </dl>
+              <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+                <label className="flex items-start gap-2 text-xs text-slate-700">
+                  <input type="checkbox" checked={configurationConfirmed} onChange={(event) => setConfigurationConfirmed(event.target.checked)} disabled={isRunning} className="mt-0.5" />
+                  <span>Confirm these selections for this analysis request.</span>
+                </label>
+                <button
+                  onClick={() => void startAnalysis()}
+                  disabled={isRunning || isLoadingDataset || !configurationConfirmed || !splitReady}
+                  className="px-4 py-2 text-xs font-semibold rounded-lg bg-teal-700 hover:bg-teal-800 text-white disabled:opacity-50 flex items-center gap-2"
+                >
+                  {isRunning ? <Clock className="w-4 h-4 animate-spin" /> : analysisResult ? <RotateCcw className="w-4 h-4" /> : <Play className="w-4 h-4" />}
+                  {isRunning ? 'Analysis running…' : analysisResult ? 'Run again' : 'Run configured analysis'}
+                </button>
+              </div>
+            </section>
+          ) : (
           <section className="bg-white border border-slate-200 rounded-xl p-5 shadow-xs">
             <h2 className="text-sm font-semibold text-slate-900">Detector column configuration</h2>
             <p className="text-xs text-slate-500 mt-1">
@@ -206,29 +428,115 @@ export const AnalysisPage: React.FC = () => {
                 Column metadata is unavailable; optional detectors cannot be configured. Exact duplicates can still run.
               </p>
             )}
+            {recommendationsLoading && (
+              <p role="status" className="mt-3 text-xs text-slate-500">
+                Loading profile-based column suggestions…
+              </p>
+            )}
+            {recommendationsError && (
+              <p role="alert" className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+                Automatic suggestions are unavailable: {recommendationsError} You can still choose columns manually.
+              </p>
+            )}
+            {recommendations && (
+              <div className="mt-4">
+                <ColumnRecommendationsPanel
+                  recommendations={recommendations}
+                  selected={recommendationSelection}
+                  onSelect={applyRecommendation}
+                />
+              </div>
+            )}
+            <SplitStrategyPanel
+              strategy={splitStrategy}
+              onStrategyChange={updateSplitStrategy}
+              testRatio={splitRatio}
+              randomSeed={splitSeed}
+              onTestRatioChange={(value) => {
+                setSplitRatio(value);
+                setSplitOperation(null);
+                setSplitGenerationConfirmed(false);
+                setConfigurationConfirmed(false);
+                setAnalysisResult(null);
+              }}
+              onRandomSeedChange={(value) => {
+                setSplitSeed(value);
+                setSplitOperation(null);
+                setSplitGenerationConfirmed(false);
+                setConfigurationConfirmed(false);
+                setAnalysisResult(null);
+              }}
+              generationConfirmed={splitGenerationConfirmed}
+              onGenerationConfirmedChange={setSplitGenerationConfirmed}
+              isGenerating={isGeneratingSplit}
+              generationError={splitGenerationError}
+              operation={splitOperation}
+              onGenerate={() => void handleGenerateSplit()}
+            />
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-4">
-              {columnSelectors.map(({ key, label, help }) => (
-                <label key={key} className="block">
-                  <span className="block text-xs font-medium text-slate-700 mb-1">{label}</span>
-                  <select
+              {visibleColumnSelectors.map(({ key, label, help }) => (
+                <div key={key}>
+                  <SearchableColumnSelector
+                    label={label}
                     value={selection[key]}
-                    onChange={(event) => updateSelection(key, event.target.value)}
-                    disabled={columns.length === 0 || isRunning}
-                    className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 disabled:bg-slate-100"
-                  >
-                    <option value="">Not selected</option>
-                    {columns.map((column) => (
-                      <option key={`${key}-${column.name}`} value={column.name}>{column.name}</option>
-                    ))}
-                  </select>
-                  <span className="block text-[11px] text-slate-500 mt-1">{help}</span>
-                </label>
+                    columns={selectableColumns}
+                    disabled={
+                      columns.length === 0
+                      || isRunning
+                      || (splitStrategy === 'none' && (key === 'entityColumn' || key === 'timeColumn'))
+                    }
+                    onChange={(value) => updateSelection(key, value)}
+                  />
+                  <span className="mt-1 block text-[11px] text-slate-500">{help}</span>
+                </div>
               ))}
             </div>
-            <div className="mt-5 flex justify-end">
+            {selection.targetColumn && (
+              <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-950" role="note">
+                <p className="font-semibold">
+                  Target and feature-input review: <span className="font-mono">{selection.targetColumn}</span>
+                </p>
+                <p className="mt-1">
+                  All other dataset columns are evaluated as candidate inputs by target-leakage detection.
+                  A deterministic association is evidence for review, not proof of causal leakage.
+                </p>
+                {potentialTargetDerivedFeatures.length > 0 && (
+                  <>
+                    <p className="mt-2 font-semibold">
+                      Possible copied, derived, or post-outcome columns to review:
+                    </p>
+                    <ul className="mt-1 list-disc space-y-1 pl-5">
+                      {potentialTargetDerivedFeatures.map((feature) => (
+                        <li key={feature.columnName} className="break-all">
+                          <span className="font-mono">{feature.columnName}</span>
+                          <span className="text-amber-800"> — {feature.signals.join(' ')}</span>
+                        </li>
+                      ))}
+                    </ul>
+                    <p className="mt-1">
+                      These names are heuristic warnings only; inspect timing and evidence before treating a finding as leakage.
+                    </p>
+                  </>
+                )}
+              </div>
+            )}
+            <label className="mt-5 flex items-start gap-2 rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs text-slate-700">
+              <input
+                type="checkbox"
+                checked={configurationConfirmed}
+                onChange={(event) => setConfigurationConfirmed(event.target.checked)}
+                disabled={isRunning}
+                className="mt-0.5"
+              />
+              <span>
+                I have reviewed the selected split strategy and detector columns and confirm this configuration.
+                Suggestions are advisory; no detector runs until I submit below.
+              </span>
+            </label>
+            <div className="mt-4 flex justify-end">
               <button
                 onClick={() => void startAnalysis()}
-                disabled={isRunning || isLoadingDataset}
+                disabled={isRunning || isLoadingDataset || !configurationConfirmed || !splitReady}
                 className="px-4 py-2 text-xs font-semibold rounded-lg bg-teal-700 hover:bg-teal-800 text-white disabled:opacity-50 flex items-center gap-2"
               >
                 {isRunning
@@ -240,6 +548,7 @@ export const AnalysisPage: React.FC = () => {
               </button>
             </div>
           </section>
+          )}
 
           <section className="p-5 bg-white border border-slate-200 rounded-xl shadow-xs" aria-live="polite">
             <div className="flex items-center justify-between gap-4 mb-3">
@@ -302,30 +611,60 @@ export const AnalysisPage: React.FC = () => {
           </section>
 
           {analysisResult && (
-            <section className="bg-white border border-slate-200 rounded-xl p-5 shadow-xs">
-              <h2 className="text-sm font-semibold text-slate-900">Findings returned by this analysis</h2>
-              {analysisResult.findings.length === 0 ? (
-                <p className="mt-2 text-xs text-slate-500">
-                  No findings were returned for this request. Detectors that were not requested were not evaluated.
+            <>
+              <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-xs">
+                <h2 className="text-sm font-semibold text-slate-900">Configuration used for this analysis</h2>
+                <p className="mt-2 text-xs text-slate-700">
+                  Split strategy: <strong>{analysisResult.splitStrategy || splitStrategy}</strong>
                 </p>
-              ) : (
-                <div className="mt-3 space-y-3">
-                  {analysisResult.findings.map((finding) => (
-                    <details key={finding.id} className="border border-slate-200 rounded-lg p-3">
-                      <summary className="cursor-pointer text-xs font-semibold text-slate-800">
-                        {finding.findingType} · {finding.severity} · {finding.status}
-                      </summary>
-                      <p className="mt-2 text-xs text-slate-700">{finding.description}</p>
-                      <p className="mt-1 text-[11px] text-slate-500">Finding ID: {finding.id}</p>
-                      <h3 className="mt-3 text-[11px] font-semibold text-slate-700">Backend evidence</h3>
-                      {finding.evidence
-                        ? <pre className="mt-1 overflow-x-auto rounded bg-slate-50 p-2 text-[11px] text-slate-700">{JSON.stringify(finding.evidence, null, 2)}</pre>
-                        : <p className="mt-1 text-[11px] text-slate-500">No evidence object was returned.</p>}
-                    </details>
-                  ))}
-                </div>
-              )}
-            </section>
+                {analysisResult.splitExplanation && (
+                  <p className="mt-1 text-xs text-slate-600">{analysisResult.splitExplanation}</p>
+                )}
+                {analysisResult.splitStrategy === 'existing' && (
+                  <>
+                    <p className="mt-1 text-xs text-slate-600">
+                      Existing split column: {String(analysisResult.splitConfiguration?.split_column ?? 'Not available')}
+                    </p>
+                    {Array.isArray(analysisResult.splitConfiguration?.warnings)
+                      && analysisResult.splitConfiguration.warnings.length > 0 && (
+                        <ul className="mt-2 list-disc rounded-lg bg-amber-50 p-3 pl-7 text-xs text-amber-900">
+                          {analysisResult.splitConfiguration.warnings.map((warning) => (
+                            <li key={String(warning)}>{String(warning)}</li>
+                          ))}
+                        </ul>
+                      )}
+                  </>
+                )}
+                {analysisResult.splitStrategy === 'generated' && (
+                  <p className="mt-1 text-xs text-slate-600">
+                    Generated operation: {String(analysisResult.splitConfiguration?.split_operation_id ?? 'Not available')} ·
+                    {' '}test ratio {String(analysisResult.splitConfiguration?.test_ratio ?? 'Not available')} ·
+                    {' '}seed {String(analysisResult.splitConfiguration?.random_seed ?? 'Not available')}
+                  </p>
+                )}
+                {(analysisResult.skippedDetectors ?? []).length > 0 && (
+                  <p className="mt-2 rounded-lg bg-amber-50 p-3 text-xs text-amber-900">
+                    Not evaluated: {analysisResult.skippedDetectors?.join(', ')}. Skipped checks are not evidence of absence.
+                  </p>
+                )}
+              </section>
+
+              <section className="bg-white border border-slate-200 rounded-xl p-5 shadow-xs">
+                <h2 className="text-sm font-semibold text-slate-900">Findings returned by this analysis</h2>
+                {analysisResult.findings.length === 0 ? (
+                  <p className="mt-2 text-xs text-slate-500">
+                    No findings were returned for this request. Detectors that were not requested or were skipped were not evaluated.
+                  </p>
+                ) : (
+                  <div className="mt-3">
+                    <GroupedFindings
+                      findings={analysisResult.findings}
+                      sourceLabel="Current analysis response. This is distinct from the complete persisted-findings search and pagination view."
+                    />
+                  </div>
+                )}
+              </section>
+            </>
           )}
         </>
       ) : null}

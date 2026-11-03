@@ -93,6 +93,96 @@ def test_successful_analysis_persists_timestamp_and_target_class_counts(client, 
     assert dataset["profile"]["target_class_counts"] == {"yes": 2, "no": 1}
 
 
+def test_readmission_target_recommendation_manual_selection_detection_and_history(client, test_db):
+    csv_content = (
+        "patient_id,readmitted_30d,diagnosis,diagnosis_copy,"
+        "readmission_flag_copy,post_discharge_followup,admission_date\n"
+        "p1,no,cardiology,cardiology,no,no,2025-01-01\n"
+        "p2,yes,cardiology,cardiology,yes,yes,2025-01-02\n"
+        "p3,no,respiratory,respiratory,no,no,2025-01-03\n"
+        "p4,yes,renal,renal,yes,yes,2025-01-04\n"
+        "p5,no,renal,renal,no,no,2025-01-05\n"
+        "p6,yes,respiratory,respiratory,yes,yes,2025-01-06\n"
+        "p7,no,cardiology,cardiology,no,no,2025-01-07\n"
+        "p8,yes,renal,renal,yes,yes,2025-01-08\n"
+    ).encode("utf-8")
+    upload = client.post(
+        "/api/v1/datasets",
+        data={
+            "name": "synthetic readmission target selection",
+            "type": "tabular",
+            "format": "CSV",
+            "description": "isolated target-selection regression fixture",
+        },
+        files={"file": ("readmission.csv", csv_content, "text/csv")},
+    )
+    assert upload.status_code == status.HTTP_201_CREATED, upload.text
+    dataset_id = upload.json()["id"]
+
+    recommendations = client.get(
+        f"/api/v1/datasets/{dataset_id}/column-recommendations"
+    )
+    assert recommendations.status_code == status.HTTP_200_OK, recommendations.text
+    assert (
+        recommendations.json()["roles"]["target"]["recommendation"]["column_name"]
+        == "readmitted_30d"
+    )
+
+    first = client.post(
+        f"/api/v1/datasets/{dataset_id}/analyze/leakage",
+        params={"target_column": "readmitted_30d", "split_strategy": "none"},
+    )
+    assert first.status_code == status.HTTP_200_OK, first.text
+    target_findings = [
+        finding for finding in first.json()["findings"]
+        if finding["finding_type"] == "target_leakage"
+    ]
+    assert target_findings
+    assert all(
+        finding["evidence"]["target_column"] == "readmitted_30d"
+        for finding in target_findings
+    )
+    assert {
+        finding["evidence"].get("feature_column")
+        for finding in target_findings
+    } >= {"readmission_flag_copy", "post_discharge_followup"}
+
+    # A manual target change is honored; the advisory recommendation is not
+    # consulted or silently reapplied by detector execution.
+    second = client.post(
+        f"/api/v1/datasets/{dataset_id}/analyze/leakage",
+        params={"target_column": "diagnosis", "split_strategy": "none"},
+    )
+    assert second.status_code == status.HTTP_200_OK, second.text
+    diagnosis_findings = [
+        finding for finding in second.json()["findings"]
+        if finding["finding_type"] == "target_leakage"
+    ]
+    assert diagnosis_findings
+    assert all(
+        finding["evidence"]["target_column"] == "diagnosis"
+        for finding in diagnosis_findings
+    )
+    assert any(
+        finding["evidence"].get("feature_column") == "diagnosis_copy"
+        for finding in diagnosis_findings
+    )
+
+    persisted = client.get(f"/api/v1/datasets/{dataset_id}")
+    assert persisted.status_code == status.HTTP_200_OK
+    assert persisted.json()["profile"]["analysis_columns"]["target_column"] == "diagnosis"
+    history = client.get(f"/api/v1/datasets/{dataset_id}/history")
+    assert history.status_code == status.HTTP_200_OK
+    analysis_events = [
+        event for event in history.json()
+        if event["event_type"] == "analysis"
+    ]
+    assert {event["details"]["columns"]["target_column"] for event in analysis_events} >= {
+        "readmitted_30d",
+        "diagnosis",
+    }
+
+
 def test_failed_analysis_preserves_last_successful_timestamp(client, test_db):
     upload = client.post(
         "/api/v1/datasets",
@@ -242,6 +332,4 @@ def test_repeated_analysis_idempotent(client, test_db):
         assert len(findings) == 1
     finally:
         db.close()
-
-
 

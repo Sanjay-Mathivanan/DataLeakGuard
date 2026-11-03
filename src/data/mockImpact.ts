@@ -115,10 +115,10 @@ export const mockDistributionShiftData: DistributionShift = {
     { className: '>50K Income', referencePct: 24.1, currentPct: 28.6 }
   ],
   featureShifts: [
-    { featureName: 'capital_gain', driftScore: 0.282, threshold: 0.20, status: 'Shift Detected' },
-    { featureName: 'hours_per_week', driftScore: 0.194, threshold: 0.20, status: 'Requires Review' },
-    { featureName: 'age', driftScore: 0.082, threshold: 0.20, status: 'Nominal' },
-    { featureName: 'education_num', driftScore: 0.064, threshold: 0.20, status: 'Nominal' },
-    { featureName: 'fnlwgt', driftScore: 0.141, threshold: 0.20, status: 'Requires Review' }
+    { featureName: 'capital_gain', driftScore: 0.282, metricKind: 'PSI', threshold: 0.20, status: 'Shift Detected' },
+    { featureName: 'hours_per_week', driftScore: 0.194, metricKind: 'PSI', threshold: 0.20, status: 'Requires Review' },
+    { featureName: 'age', driftScore: 0.082, metricKind: 'PSI', threshold: 0.20, status: 'Nominal' },
+    { featureName: 'education_num', driftScore: 0.064, metricKind: 'PSI', threshold: 0.20, status: 'Nominal' },
+    { featureName: 'fnlwgt', driftScore: 0.141, metricKind: 'PSI', threshold: 0.20, status: 'Requires Review' }
   ]
 };

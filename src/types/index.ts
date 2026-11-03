@@ -36,6 +36,7 @@ export interface DatasetProfile {
     targetColumn?: string | null;
     timeColumn?: string | null;
   };
+  splitStrategy?: Record<string, unknown>;
 }
 
 export interface Dataset {
@@ -119,6 +120,97 @@ export interface PersistedFinding {
   createdAt: string | null;
 }
 
+export interface FindingCounts {
+  total: number;
+  open: number;
+  resolved: number;
+  low: number;
+  medium: number;
+  high: number;
+  otherSeverity: number;
+  statusCounts: Record<string, number>;
+  detectorCounts: Record<string, number>;
+}
+
+export interface DatasetFindingPage {
+  items: PersistedFinding[];
+  total: number;
+  skip: number;
+  limit: number;
+  datasetSummary: FindingCounts;
+  matchingSummary: FindingCounts;
+  detectorSummary?: FindingCounts;
+}
+
+export interface FindingPageFilters {
+  skip?: number;
+  limit?: number;
+  search?: string;
+  findingType?: string;
+  severity?: string;
+  status?: string;
+}
+
+export interface DatasetHistoryItem {
+  id: string;
+  eventType: string;
+  outcome: string;
+  details: Record<string, unknown> | null;
+  createdAt: string;
+  completedAt: string | null;
+  datasetId: string;
+  datasetName: string;
+  findingId: string | null;
+  operationId: string | null;
+  userId: string | null;
+  failureReason: string | null;
+}
+
+export interface DatasetHistoryPage {
+  items: DatasetHistoryItem[];
+  total: number;
+  skip: number;
+  limit: number;
+}
+
+export type DetectorColumnRole = 'target' | 'entity' | 'split' | 'timestamp';
+export type RecommendationConfidence = 'high' | 'medium' | 'low' | 'not_recommended';
+
+export interface ColumnRecommendationCandidate {
+  columnName: string;
+  role: DetectorColumnRole;
+  score: number;
+  confidence: RecommendationConfidence;
+  explanation: string;
+  supportingSignals: string[];
+  warnings: string[];
+  profile: {
+    dataType: string;
+    kind: string;
+    uniqueCount: number | null;
+    uniqueRatio: number | null;
+    missingCount: number | null;
+    missingRatio: number | null;
+    sampleCount: number | null;
+    recognizedSplitLabels: string[];
+    datetimeParseableSampleCount: number;
+    previewRowsConsidered: number;
+  };
+}
+
+export interface ColumnRoleRecommendations {
+  recommendation: ColumnRecommendationCandidate | null;
+  candidates: ColumnRecommendationCandidate[];
+  warnings: string[];
+}
+
+export interface ColumnRecommendationsResponse {
+  profiledColumnCount: number;
+  sampleCount: number | null;
+  roles: Record<DetectorColumnRole, ColumnRoleRecommendations>;
+  limitations: string[];
+}
+
 /** A count derived only from persisted findings; it does not imply detector coverage. */
 export interface FindingCategorySummary {
   findingType: string;
@@ -144,6 +236,29 @@ export interface AnalysisResult {
     totalFindings: number;
     duplicateFindings: number;
   };
+  splitStrategy?: 'existing' | 'generated' | 'none';
+  splitConfiguration?: Record<string, unknown>;
+  skippedDetectors?: string[];
+  splitExplanation?: string | null;
+}
+
+export interface SplitGenerationOperation {
+  id: string;
+  datasetId: string;
+  operationType: string;
+  status: string;
+  splitColumn: string;
+  testRatio: number;
+  randomSeed: number;
+  algorithm: string;
+  rowCount: number;
+  splitRowCounts: Record<string, number>;
+  inputFileSha256: string;
+  outputFileSha256: string;
+  outputFilename: string;
+  createdAt: string | null;
+  completedAt: string | null;
+  reused: boolean;
 }
 
 export type FindingOperationType = 'repair' | 'quarantine';
@@ -154,12 +269,36 @@ export interface SkippedRepairFinding {
 }
 
 export interface CombinedRepairMetadata {
+  selectedFindingIds?: string[];
+  appliedFindingIds?: string[];
+  skippedFindings: SkippedRepairFinding[];
+  skippedFindingsRecorded?: boolean;
+  originalRowCount?: number;
+  finalRowCount?: number;
+  duplicateRowsRemoved?: number;
+  evidenceReferenceFindingIds?: string[];
+  repairStrategy?: string;
+  verificationStatus?: string;
+  verification?: Record<string, unknown>;
+}
+
+export interface CombinedRepairPreview {
+  datasetId: string;
+  inputFileSha256: string;
   selectedFindingIds: string[];
   appliedFindingIds: string[];
   skippedFindings: SkippedRepairFinding[];
   originalRowCount: number;
   finalRowCount: number;
   duplicateRowsRemoved: number;
+  affectedRowIndicesPreview?: number[];
+  affectedRowIndicesCount?: number;
+  affectedRowIndicesTruncated?: boolean;
+  affectedRowIndicesSha256?: string;
+  operationType: string;
+  status: 'preview' | 'not_eligible';
+  previewToken: string | null;
+  explanation: string;
 }
 
 /** Fields returned by the persisted repair/quarantine operation APIs. */
@@ -177,6 +316,114 @@ export interface DatasetOperationRecord {
   operationMetadata?: CombinedRepairMetadata | null;
   createdAt?: string | null;
   completedAt?: string | null;
+}
+
+export type RemediationActionName =
+  | 'exact_duplicate_keep_first'
+  | 'quarantine_evidenced_rows'
+  | 'rebuild_group_split'
+  | 'exclude_target_features'
+  | 'rebuild_chronological_split'
+  | 'exclude_contaminated_copies'
+  | 'review_only';
+
+export interface RemediationActionRequest {
+  action: RemediationActionName;
+  selection_mode?: 'explicit' | 'all_eligible';
+  finding_ids?: string[];
+  finding_type?: string;
+  entity_column?: string;
+  split_column?: string;
+  target_column?: string;
+  feature_columns?: string[];
+  time_column?: string;
+  cutoff?: string;
+  retained_partition?: string;
+  test_ratio?: number;
+  random_seed?: number;
+  train_label?: string;
+  test_label?: string;
+}
+
+export interface RemediationPlanActionSummary {
+  action: RemediationActionName;
+  selectionMode: 'explicit' | 'all_eligible';
+  findingType: string | null;
+  selectedCount: number;
+  appliedCount: number;
+  configuration: Record<string, unknown>;
+}
+
+export interface RemediationSkippedFinding {
+  findingId: string;
+  reason: string;
+}
+
+export interface RemediationPlanSummary {
+  planId: string;
+  version: number;
+  executionStatus: string;
+  userConfirmation: boolean;
+  previewDigest: string;
+  previewToken: string | null;
+  originalFileSha256: string;
+  finalFileSha256?: string;
+  repairReportSha256?: string;
+  manifestSha256?: string;
+  quarantineOutputSha256?: string | null;
+  originalRowCount: number;
+  expectedFinalRowCount: number;
+  finalRowCount?: number;
+  originalColumnCount: number;
+  expectedFinalColumnCount: number;
+  finalColumnCount?: number;
+  removedRowCount?: number;
+  quarantinedRowCount?: number;
+  affectedSourceRowPositionsPreview: number[];
+  affectedSourceRowPositionsCount: number;
+  affectedSourceRowPositionsTruncated: boolean;
+  affectedSourceRowPositionsSha256: string;
+  excludedFeatureColumns: string[];
+  splitUpdateCount: number;
+  unresolvedFindingsCount: number;
+  finalStatus?: string;
+  verification?: Record<string, unknown>;
+  completedAt?: string;
+  failureReason?: string;
+  selectedCount: number;
+  selectedFindingIdsPreview: string[];
+  selectedFindingIdsTruncated: boolean;
+  detectorTypes: string[];
+  appliedCount: number;
+  skippedFindings: RemediationSkippedFinding[];
+  skippedFindingsTruncated: boolean;
+  splitConfigurations: Array<Record<string, unknown>>;
+  actions: RemediationPlanActionSummary[];
+}
+
+export interface RemediationPlanRecord {
+  id: string;
+  datasetId: string;
+  operationType: string;
+  status: string;
+  createdAt: string | null;
+  completedAt: string | null;
+  originalFileSha256: string | null;
+  outputFileSha256: string | null;
+  outputFilename: string | null;
+  plan: RemediationPlanSummary;
+  artifactHashes?: {
+    dataset?: string;
+    repairReport?: string;
+    manifest?: string;
+  };
+}
+
+export interface RemediationPlanPage {
+  items: RemediationPlanRecord[];
+  total: number;
+  skip: number;
+  limit: number;
 }
 
 export interface Model {
@@ -205,7 +452,7 @@ export interface BoundingBox {
 
 export interface InferencePrediction {
   label: string;
-  confidence: number;
+  confidence: number | null;
   secondaryClass?: string;
   secondaryConfidence?: number;
   boundingBoxes?: BoundingBox[];
@@ -222,7 +469,7 @@ export interface InferenceRecord {
   nonce: string;
   sequenceNumber: number;
   digitalSignature: string;
-  verificationStatus: 'Verified' | 'Tampered' | 'Replay Detected';
+  verificationStatus: 'Verified' | 'Tampered' | 'Replay Detected' | 'Metadata persisted';
   prediction: InferencePrediction;
   inputMetadata: {
     filename: string;
@@ -239,9 +486,9 @@ export interface DistributionShift {
   currentDatasetId: string;
   overallShiftDetected: boolean;
   shiftLevel: 'No Significant Shift' | 'Potential Shift' | 'Review Required';
-  psiScore: number; // Population Stability Index
-  wassersteinDistance: number;
-  oodRate: number; // percentage
+  psiScore: number | null; // Mean of persisted numeric-column PSI values, if available
+  wassersteinDistance: number | null;
+  oodRate: number | null; // percentage
   classBalanceShift: {
     className: string;
     referencePct: number;
@@ -250,6 +497,7 @@ export interface DistributionShift {
   featureShifts: {
     featureName: string;
     driftScore: number;
+    metricKind: 'PSI' | 'Distribution delta';
     threshold: number;
     status: 'Nominal' | 'Shift Detected' | 'Requires Review';
   }[];
@@ -277,6 +525,27 @@ export interface ImpactAnalysis {
   };
 }
 
+export interface PersistedReportDataset {
+  id: string;
+  name: string;
+  format: string;
+  sha256: string | null;
+}
+
+export interface PersistedReportImpact {
+  findings_total?: number;
+  findings_open?: number;
+  findings_high_severity?: number;
+  operations_total?: number;
+  operations_completed?: number;
+  affected_rows?: number;
+}
+
+export interface PersistedReportContent {
+  datasets: PersistedReportDataset[];
+  impact: PersistedReportImpact[];
+}
+
 export interface AssuranceReport {
   id: string;
   title: string;
@@ -285,17 +554,18 @@ export interface AssuranceReport {
   modelId: string;
   modelName: string;
   createdAt: string;
-  assessmentStatus: 'REVIEW REQUIRED' | 'POTENTIALLY ACCEPTABLE' | 'QUARANTINE RECOMMENDED';
-  disposition: 'ACCEPT' | 'REVIEW' | 'QUARANTINE';
-  confidenceScore: number;
-  projectDefinedRisk: 'LOW' | 'MODERATE' | 'ELEVATED' | 'HIGH';
+  assessmentStatus: 'REVIEW REQUIRED' | 'POTENTIALLY ACCEPTABLE' | 'QUARANTINE RECOMMENDED' | 'NOT ASSESSED';
+  disposition: 'ACCEPT' | 'REVIEW' | 'QUARANTINE' | 'NOT ASSESSED';
+  confidenceScore: number | null;
+  projectDefinedRisk: 'LOW' | 'MODERATE' | 'ELEVATED' | 'HIGH' | 'NOT ASSESSED';
   executiveSummary: string;
   findingsCount: {
-    critical: number;
-    high: number;
-    medium: number;
-    low: number;
+    critical: number | null;
+    high: number | null;
+    medium: number | null;
+    low: number | null;
   };
+  persistedContent?: PersistedReportContent;
   sections: {
     datasetIntegrity: string;
     leakageFindings: string;

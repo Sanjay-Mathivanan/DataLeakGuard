@@ -5,6 +5,7 @@ from app.db.session import get_db
 from app.services.quarantine_service import quarantine_finding
 from app.api.identity import get_current_user
 from app.services.activity_service import record_user_event
+from app.utils.operation_metadata import normalize_operation_response
 
 router = APIRouter()
 
@@ -31,10 +32,12 @@ def quarantine_finding_endpoint(
 
     # Call the quarantine service
     try:
-        result = quarantine_finding(
-            dataset_id=finding.dataset_id,
-            finding_id=finding_id,
-            db=db
+        result = normalize_operation_response(
+            quarantine_finding(
+                dataset_id=finding.dataset_id,
+                finding_id=finding_id,
+                db=db
+            )
         )
     except Exception:
         record_user_event(
@@ -90,7 +93,7 @@ def get_dataset_quarantines(
     # Convert to expected format (matching test expectations)
     quarantine_results = []
     for record in quarantine_records:
-        quarantine_results.append({
+        quarantine_results.append(normalize_operation_response({
             "id": str(record.id),
             "dataset_id": record.dataset_id,
             "finding_id": record.finding_id,
@@ -106,9 +109,10 @@ def get_dataset_quarantines(
             "affected_rows": getattr(record, 'affected_rows', 0),
             "affected_columns": getattr(record, 'affected_columns', []),
             "quarantine_info": getattr(record, 'quarantine_info', None),
+            "operation_metadata": record.operation_metadata,
             "created_at": record.created_at.isoformat() if record.created_at else None,
             "completed_at": record.completed_at.isoformat() if record.completed_at else None
-        })
+        }))
 
     return quarantine_results
 
@@ -138,7 +142,7 @@ def get_quarantine(
     ).first()
 
     # Convert quarantine record to the expected format (matching test expectations)
-    return {
+    return normalize_operation_response({
         "id": str(quarantine_record.id),
         "dataset_id": quarantine_record.dataset_id,
         "finding_id": quarantine_record.finding_id,
@@ -154,6 +158,7 @@ def get_quarantine(
         "affected_rows": getattr(quarantine_record, 'affected_rows', 0),
         "affected_columns": getattr(quarantine_record, 'affected_columns', []),
         "quarantine_info": getattr(quarantine_record, 'quarantine_info', None),
+        "operation_metadata": quarantine_record.operation_metadata,
         "created_at": quarantine_record.created_at.isoformat() if quarantine_record.created_at else None,
         "completed_at": quarantine_record.completed_at.isoformat() if quarantine_record.completed_at else None
-    }
+    })

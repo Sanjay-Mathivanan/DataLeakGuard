@@ -2,11 +2,16 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { DatasetOperationRecord, PersistedFinding } from '../types';
+import {
+  CombinedRepairPreview,
+  DatasetOperationRecord,
+  PersistedFinding,
+} from '../types';
 import {
   canDownloadOperation,
   downloadOperationToBrowser,
   getEligibleCombinedRepairFindings,
+  getRepairEligibility,
   getSupportedFindingOperations,
   RepairPageView,
   validateCombinedRepairSelection,
@@ -51,10 +56,15 @@ function renderView(
     selectedCombinedFindingIds: [],
     combinedRepairLoading: false,
     combinedRepairError: null,
+    combinedRepairPreview: null,
+    combinedRepairConfirmed: false,
     onRunOperation: () => {},
     onDownloadOperation: () => {},
     onToggleCombinedFinding: () => {},
-    onGenerateCombinedRepair: () => {},
+    onPreviewCombinedRepair: () => {},
+    onCancelCombinedRepairPreview: () => {},
+    onCombinedRepairConfirmedChange: () => {},
+    onConfirmCombinedRepair: () => {},
     onRetry: () => {},
     ...overrides,
   };
@@ -96,6 +106,50 @@ test('operation eligibility is restricted to supported types with matching ident
     getSupportedFindingOperations({ ...finding, evidence: null }, 'dataset-4'),
     []
   );
+});
+
+test('repair eligibility explains supported deterministic actions and unsupported findings', () => {
+  const eligibility = getRepairEligibility(finding, 'dataset-4');
+  assert.equal(eligibility.eligible, true);
+  assert.equal(eligibility.duplicateRowsToRemove, 1);
+  assert.match(eligibility.explanation, /keep-first/);
+  assert.match(eligibility.explanation, /original is not modified/);
+
+  const unsupported = getRepairEligibility(
+    { ...finding, findingType: 'target_leakage' },
+    'dataset-4'
+  );
+  assert.equal(unsupported.eligible, false);
+  assert.match(unsupported.explanation, /No deterministic automatic repair strategy/);
+
+  const malformed = getRepairEligibility(
+    { ...finding, evidence: { duplicate_count: 3, row_indices: [2, 7] } },
+    'dataset-4'
+  );
+  assert.equal(malformed.eligible, false);
+  assert.match(malformed.explanation, /consistent group/);
+});
+
+test('repair history distinguishes verified new output from legacy unavailable verification', () => {
+  const verified: DatasetOperationRecord = {
+    ...operation,
+    operationMetadata: {
+      selectedFindingIds: [finding.id],
+      appliedFindingIds: [finding.id],
+      skippedFindings: [],
+      originalRowCount: 8,
+      finalRowCount: 7,
+      duplicateRowsRemoved: 1,
+      repairStrategy: 'exact_duplicate_keep_first',
+      verificationStatus: 'verified',
+    },
+  };
+  const verifiedHtml = renderView({ history: [verified] });
+  assert.match(verifiedHtml, /Post-repair verification: verified/);
+  assert.match(verifiedHtml, /one row remains in the evidenced duplicate group/);
+
+  const legacyHtml = renderView({ history: [operation] });
+  assert.match(legacyHtml, /Post-repair verification: not available/);
 });
 
 test('combined repair eligibility requires matching dataset, open status, supported evidence, and no prior repair', () => {
@@ -216,7 +270,7 @@ test('operation history distinguishes quarantine files from processed repair cop
 test('combined selection is explicit and empty selection cannot be submitted', () => {
   const empty = renderView();
   assert.match(empty, /Select at least one eligible exact-duplicate finding/);
-  assert.match(empty, /Generate Combined Cleaned Dataset/);
+  assert.match(empty, /Preview Combined Cleaning/);
   assert.match(empty, /disabled=""/);
   assert.match(empty, /type="checkbox"/);
 
@@ -228,6 +282,71 @@ test('combined selection is explicit and empty selection cannot be submitted', (
     renderView({ combinedRepairError: 'The finding is no longer eligible.' }),
     /The finding is no longer eligible/
   );
+});
+
+test('combined cleaning requires a server preview and explicit confirmation', () => {
+  const preview: CombinedRepairPreview = {
+    datasetId: 'dataset-4',
+    inputFileSha256: 'a'.repeat(64),
+    selectedFindingIds: [finding.id],
+    appliedFindingIds: [finding.id],
+    skippedFindings: [],
+    originalRowCount: 8,
+    finalRowCount: 7,
+    duplicateRowsRemoved: 1,
+    affectedRowIndicesPreview: [2],
+    affectedRowIndicesCount: 1,
+    affectedRowIndicesTruncated: false,
+    affectedRowIndicesSha256: 'a'.repeat(64),
+    operationType: 'combined_repair_preview',
+    status: 'preview',
+    previewToken: 'preview-token',
+    explanation: 'One later duplicate row will be removed from a separate output.',
+  };
+  const withoutConfirmation = renderView({
+    selectedCombinedFindingIds: [finding.id],
+    combinedRepairPreview: preview,
+  });
+  assert.match(withoutConfirmation, /Server-computed preview/);
+  assert.match(withoutConfirmation, /expected final rows: <strong>7/);
+  assert.match(withoutConfirmation, /Source records to omit/);
+  assert.match(withoutConfirmation, /0-based row positions/);
+  assert.match(withoutConfirmation, /2/);
+  assert.match(withoutConfirmation, /Cancel Preview/);
+  assert.match(withoutConfirmation, /I reviewed this exact preview/);
+  assert.match(withoutConfirmation, /Confirm and Generate Cleaned Dataset/);
+  assert.match(withoutConfirmation, /disabled=""/);
+
+  const confirmed = renderView({
+    selectedCombinedFindingIds: [finding.id],
+    combinedRepairPreview: preview,
+    combinedRepairConfirmed: true,
+  });
+  assert.doesNotMatch(confirmed, /Confirm and Generate Cleaned Dataset[^]*?disabled=""/);
+});
+
+test('no-eligible combined preview explains why execution is unavailable', () => {
+  const preview: CombinedRepairPreview = {
+    datasetId: 'dataset-4',
+    inputFileSha256: 'b'.repeat(64),
+    selectedFindingIds: [finding.id],
+    appliedFindingIds: [],
+    skippedFindings: [{ findingId: finding.id, reason: 'Evidence is stale.' }],
+    originalRowCount: 8,
+    finalRowCount: 8,
+    duplicateRowsRemoved: 0,
+    operationType: 'combined_repair_preview',
+    status: 'not_eligible',
+    previewToken: null,
+    explanation: 'No selected finding currently supports a safe combined-cleaning output.',
+  };
+  const html = renderView({
+    selectedCombinedFindingIds: [finding.id],
+    combinedRepairPreview: preview,
+  });
+  assert.match(html, /Evidence is stale/);
+  assert.match(html, /No eligible rows can be safely removed/);
+  assert.doesNotMatch(html, /Confirm and Generate Cleaned Dataset/);
 });
 
 test('combined operation history displays truthful summary, provenance, and final download action', () => {
@@ -258,6 +377,23 @@ test('combined operation history displays truthful summary, provenance, and fina
   assert.match(html, /verified-output-hash/);
   assert.match(html, /Download Final Dataset/);
   assert.equal(canDownloadOperation(combined), true);
+});
+
+test('legacy combined operation metadata displays unavailable details without crashing', () => {
+  const legacy: DatasetOperationRecord = {
+    id: 'legacy-combined',
+    datasetId: 'dataset-4',
+    operationType: 'combined_repair',
+    status: 'failed',
+    operationMetadata: {
+      skippedFindings: [],
+      skippedFindingsRecorded: false,
+    },
+  };
+  const html = renderView({ history: [legacy] });
+  assert.match(html, /Original data rows: <strong>Not recorded/);
+  assert.match(html, /Applied findings: Not recorded/);
+  assert.match(html, /Skipped-finding details were not recorded/);
 });
 
 test('only completed repair and quarantine records with operation IDs expose download controls', () => {

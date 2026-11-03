@@ -1,5 +1,7 @@
 import os
 import hashlib
+import hmac
+import json
 import pandas as pd
 from pathlib import Path
 from typing import Tuple, Optional, List, Dict, Any
@@ -18,6 +20,8 @@ from .repair_quarantine_utils import (
     create_base_repair_record,
     cleanup_created_output_if_unreferenced,
 )
+
+_COMBINED_REPAIR_ROW_REFERENCE_LIMIT = 200
 
 
 def repair_exact_duplicates(
@@ -108,14 +112,21 @@ def repair_exact_duplicates(
             detail="Invalid evidence format"
         )
 
-    # Extract duplicate information from evidence
+    # Extract and validate duplicate evidence before modifying a copy.
     duplicate_count = evidence.get("duplicate_count")
     row_indices = evidence.get("row_indices")
 
-    if duplicate_count is None or row_indices is None:
+    if (
+        type(duplicate_count) is not int
+        or duplicate_count < 2
+        or not isinstance(row_indices, list)
+        or len(row_indices) != duplicate_count
+        or not all(type(index) is int for index in row_indices)
+        or len(set(row_indices)) != len(row_indices)
+    ):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Evidence missing required duplicate information"
+            detail="Duplicate evidence is missing or malformed"
         )
 
     # Step 4: Read the original file based on format
@@ -135,42 +146,67 @@ def repair_exact_duplicates(
             detail=f"Failed to read file: {str(e)}"
         )
 
-    # Step 5: Apply repair algorithm - remove duplicate rows, keep first occurrence
+    # The operation is eligible only while the persisted evidence still
+    # identifies exactly the same duplicate group in the current source.
     original_row_count = len(df)
-
-    # Create a copy to work with
-    df_processed = df.copy()
-
-    # Sort indices to ensure we process them in order
-    # Convert to list of integers and sort
-    try:
-        sorted_indices = sorted([int(idx) for idx in row_indices])
-    except (ValueError, TypeError) as e:
+    sorted_indices = sorted(row_indices)
+    if any(index < 0 or index >= original_row_count for index in sorted_indices):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid evidence format"
+            detail="Duplicate evidence row indices are outside the current dataset"
         )
 
-    # Keep the first occurrence, remove all subsequent duplicates
-    # If we have indices [0, 2, 4], we want to keep 0 and remove [2, 4]
-    if len(sorted_indices) > 1:
-        indices_to_remove = sorted_indices[1:]  # All except the first
-    else:
-        indices_to_remove = []  # No duplicates to remove if only one index
+    excluded_columns = evidence.get("hash_excluded_columns", [])
+    if (
+        not isinstance(excluded_columns, list)
+        or any(
+            not isinstance(column, str) or column not in df.columns
+            for column in excluded_columns
+        )
+        or len(set(excluded_columns)) != len(excluded_columns)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Duplicate evidence contains invalid hash-exclusion metadata"
+        )
+    comparison_frame = df.drop(columns=excluded_columns)
+    try:
+        current_hashes = [
+            hash_row(comparison_frame.iloc[index])
+            for index in range(original_row_count)
+        ]
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Unable to verify duplicate evidence against the current dataset"
+        ) from exc
+    evidenced_hash = current_hashes[sorted_indices[0]]
+    evidenced_group = [
+        index for index, row_hash in enumerate(current_hashes)
+        if row_hash == evidenced_hash
+    ]
+    stored_hash = evidence.get("hash")
+    if (
+        evidenced_group != sorted_indices
+        or (stored_hash is not None and stored_hash != evidenced_hash)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Duplicate evidence no longer matches the original dataset rows"
+        )
 
-    # Remove duplicates in reverse order to maintain correct indices
-    for idx in reversed(indices_to_remove):
-        if idx < len(df_processed):
-            df_processed = df_processed.drop(df_processed.index[idx])
+    # Keep the first occurrence and remove later rows in this validated group.
+    indices_to_remove = sorted_indices[1:]
+    df_processed = df.drop(index=indices_to_remove).copy()
 
     processed_row_count = len(df_processed)
     rows_removed = original_row_count - processed_row_count
 
-    # Verify we removed the expected number of rows
-    if rows_removed != duplicate_count:
-        # This might happen if there are overlapping duplicate groups
-        # but we'll proceed with what we actually removed
-        pass
+    if rows_removed != duplicate_count - 1:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The current duplicate evidence does not support the expected repair"
+        )
 
     # Check for a completed operation before creating any output file.
     repair_record = find_existing_completed_operation(
@@ -206,6 +242,43 @@ def repair_exact_duplicates(
 
         try:
             processed_sha256 = compute_file_sha256(processed_path)
+            if dataset.format.upper() == "CSV":
+                verified_frame = pd.read_csv(processed_path, dtype=str)
+            else:
+                verified_frame = pd.read_excel(processed_path, dtype=str)
+            if (
+                len(verified_frame) != processed_row_count
+                or list(verified_frame.columns) != list(df.columns)
+            ):
+                raise ValueError("The generated output row count or schema did not verify")
+            verified_comparison = verified_frame.drop(columns=excluded_columns)
+            remaining_group_count = sum(
+                hash_row(verified_comparison.iloc[index]) == evidenced_hash
+                for index in range(len(verified_comparison))
+            )
+            if remaining_group_count != 1:
+                raise ValueError("The duplicate condition remains after repair")
+
+            operation_metadata = {
+                "selected_finding_ids": [finding_id],
+                "applied_finding_ids": [finding_id],
+                "skipped_findings": [],
+                "original_row_count": original_row_count,
+                "final_row_count": processed_row_count,
+                "duplicate_rows_removed": rows_removed,
+                "evidence_reference_finding_ids": [finding_id],
+                "repair_strategy": "exact_duplicate_keep_first",
+                "verification_status": "verified",
+                "verification": {
+                    "input_file_hash_checked": bool(dataset.file_sha256),
+                    "evidence_matches_input": True,
+                    "output_sha256": processed_sha256,
+                    "output_readable": True,
+                    "output_schema_matches": True,
+                    "output_row_count": len(verified_frame),
+                    "remaining_evidenced_duplicate_rows": remaining_group_count,
+                },
+            }
             repair_record = create_base_repair_record(
                 dataset_id=dataset_id,
                 finding_id=finding_id,
@@ -217,6 +290,7 @@ def repair_exact_duplicates(
             repair_record.affected_rows = rows_removed
             repair_record.affected_columns = []
             repair_record.quarantine_info = None
+            repair_record.operation_metadata = operation_metadata
 
             db.add(repair_record)
             db.commit()
@@ -244,6 +318,7 @@ def repair_exact_duplicates(
         "affected_rows": repair_record.affected_rows,
         "affected_columns": [],
         "quarantine_info": repair_record.quarantine_info,
+        "operation_metadata": repair_record.operation_metadata,
         "created_at": repair_record.created_at.isoformat() if repair_record.created_at else None,
         "completed_at": repair_record.completed_at.isoformat() if repair_record.completed_at else None
     }
@@ -253,6 +328,9 @@ def generate_combined_exact_duplicate_repair(
     dataset_id: str,
     selected_finding_ids: List[str],
     db: Session,
+    *,
+    preview_only: bool = False,
+    expected_preview_token: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Create one cleaned copy from explicitly selected, current duplicate findings."""
     if not isinstance(selected_finding_ids, list):
@@ -296,20 +374,24 @@ def generate_combined_exact_duplicate_repair(
             detail="Original file SHA-256 mismatch - file may be corrupted",
         )
 
-    # Return an equivalent completed operation before writing another output.
+    # Return an equivalent completed operation only when the same preview was
+    # explicitly confirmed. The token is a staleness check, not authorization.
     completed_operations = db.query(models.RepairRecord).filter(
         models.RepairRecord.dataset_id == dataset_id,
         models.RepairRecord.operation_type == "combined_repair",
         models.RepairRecord.status == "completed",
     ).all()
-    for existing in completed_operations:
-        metadata = existing.operation_metadata
-        if (
-            existing.input_file_sha256 == input_sha256
-            and isinstance(metadata, dict)
-            and metadata.get("selected_finding_ids") == requested_ids
-        ):
-            return _combined_repair_response(existing, dataset.storage_filename)
+    if not preview_only and expected_preview_token:
+        for existing in completed_operations:
+            metadata = existing.operation_metadata
+            if (
+                existing.input_file_sha256 == input_sha256
+                and isinstance(metadata, dict)
+                and metadata.get("selected_finding_ids") == requested_ids
+                and isinstance(metadata.get("preview_token"), str)
+                and hmac.compare_digest(metadata["preview_token"], expected_preview_token)
+            ):
+                return _combined_repair_response(existing, dataset.storage_filename)
 
     try:
         if dataset.format.upper() == "CSV":
@@ -333,12 +415,6 @@ def generate_combined_exact_duplicate_repair(
             status_code=400,
             detail="Every selected finding must belong to the specified dataset",
         )
-    if any(finding.finding_type != "exact_duplicate" for finding in findings):
-        raise HTTPException(
-            status_code=400,
-            detail="Combined repair supports exact_duplicate findings only",
-        )
-
     previously_applied_ids = set()
     individual_repairs = db.query(models.RepairRecord.finding_id).filter(
         models.RepairRecord.dataset_id == dataset_id,
@@ -405,6 +481,15 @@ def generate_combined_exact_duplicate_repair(
     rows_to_remove = set()
     for finding_id in requested_ids:
         finding = findings_by_id[finding_id]
+        if finding.finding_type != "exact_duplicate":
+            skipped_findings.append({
+                "finding_id": finding_id,
+                "reason": (
+                    "Combined cleaning supports exact_duplicate findings only; "
+                    f"'{finding.finding_type}' is not eligible."
+                ),
+            })
+            continue
         if not isinstance(finding.status, str) or finding.status.strip().lower() != "open":
             skipped_findings.append({
                 "finding_id": finding_id,
@@ -475,6 +560,72 @@ def generate_combined_exact_duplicate_repair(
         applied_ids.append(finding_id)
         rows_to_remove.update(actual_group_indices[1:])
 
+    original_row_count = len(original_frame)
+    final_row_count = original_row_count - len(rows_to_remove)
+    duplicate_rows_removed = len(rows_to_remove)
+    removed_row_indices = sorted(rows_to_remove)
+    affected_row_indices_sha256 = hashlib.sha256(
+        json.dumps(
+            removed_row_indices,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    preview_payload = {
+        "dataset_id": dataset_id,
+        "input_file_sha256": input_sha256,
+        "selected_finding_ids": requested_ids,
+        "applied_finding_ids": applied_ids,
+        "skipped_findings": skipped_findings,
+        "original_row_count": original_row_count,
+        "final_row_count": final_row_count,
+        "duplicate_rows_removed": duplicate_rows_removed,
+        "affected_row_indices_preview": removed_row_indices[
+            :_COMBINED_REPAIR_ROW_REFERENCE_LIMIT
+        ],
+        "affected_row_indices_count": len(removed_row_indices),
+        "affected_row_indices_truncated": (
+            len(removed_row_indices) > _COMBINED_REPAIR_ROW_REFERENCE_LIMIT
+        ),
+        "affected_row_indices_sha256": affected_row_indices_sha256,
+        "removed_row_indices": removed_row_indices,
+    }
+    preview_token = hashlib.sha256(
+        json.dumps(
+            preview_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+    if preview_only:
+        return {
+            **{
+                key: value
+                for key, value in preview_payload.items()
+                if key != "removed_row_indices"
+            },
+            "operation_type": "combined_repair_preview",
+            "status": "preview" if applied_ids and rows_to_remove else "not_eligible",
+            "preview_token": preview_token if applied_ids and rows_to_remove else None,
+            "explanation": (
+                "Eligible exact-duplicate findings will be applied to one separate output. "
+                "The uploaded original remains unchanged."
+                if applied_ids and rows_to_remove
+                else "No selected finding currently supports a safe combined-cleaning output."
+            ),
+        }
+
+    if not expected_preview_token:
+        raise HTTPException(
+            status_code=status.HTTP_428_PRECONDITION_REQUIRED,
+            detail="Run a current preview and provide its token before confirming combined cleaning",
+        )
+    if not hmac.compare_digest(expected_preview_token, preview_token):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Combined-cleaning inputs changed after preview; preview the current selection again",
+        )
+
     if not applied_ids or not rows_to_remove:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -484,10 +635,8 @@ def generate_combined_exact_duplicate_repair(
             },
         )
 
-    original_row_count = len(original_frame)
     cleaned_frame = original_frame.drop(index=sorted(rows_to_remove))
     final_row_count = len(cleaned_frame)
-    duplicate_rows_removed = len(rows_to_remove)
     metadata = {
         "selected_finding_ids": requested_ids,
         "applied_finding_ids": applied_ids,
@@ -495,6 +644,18 @@ def generate_combined_exact_duplicate_repair(
         "original_row_count": original_row_count,
         "final_row_count": final_row_count,
         "duplicate_rows_removed": duplicate_rows_removed,
+        "affected_row_indices_preview": preview_payload[
+            "affected_row_indices_preview"
+        ],
+        "affected_row_indices_count": preview_payload[
+            "affected_row_indices_count"
+        ],
+        "affected_row_indices_truncated": preview_payload[
+            "affected_row_indices_truncated"
+        ],
+        "affected_row_indices_sha256": affected_row_indices_sha256,
+        "evidence_reference_finding_ids": applied_ids,
+        "preview_token": preview_token,
     }
 
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)

@@ -1,5 +1,5 @@
-from pydantic import BaseModel
-from typing import Optional, List, Dict, Any
+from pydantic import BaseModel, Field
+from typing import Optional, List, Dict, Any, Literal
 from datetime import datetime
 
 
@@ -28,6 +28,10 @@ class LeakageAnalysisResponse(BaseModel):
     duplicate_group_count: int
     duplicated_row_count: int
     findings: List[LeakageFindingRead]
+    split_strategy: Literal["existing", "generated", "none"] = "none"
+    split_configuration: Dict[str, Any] = Field(default_factory=dict)
+    skipped_detectors: List[str] = Field(default_factory=list)
+    split_explanation: Optional[str] = None
 
     model_config = {
         "from_attributes": True,

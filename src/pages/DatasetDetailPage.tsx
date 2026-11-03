@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Database,
   Play,
@@ -14,8 +14,11 @@ import {
   ArrowRight,
   Info
 } from 'lucide-react';
-import { Dataset, PersistedFinding } from '../types';
-import { getDatasetById, getDatasetHistory, getFindings } from '../services/api';
+import { Dataset } from '../types';
+import { getDatasetById, getFindingsPage } from '../services/api';
+import { PersistedFindingsBrowser } from '../components/leakage/PersistedFindingsBrowser';
+import { DatasetHistoryTimeline } from '../components/history/DatasetHistoryTimeline';
+import { FeatureProfiles } from '../components/dataset/FeatureProfiles';
 import { StatusBadge } from '../components/common/StatusBadge';
 import { StatCard } from '../components/common/StatCard';
 import { CardSkeleton, TableSkeleton } from '../components/common/LoadingSkeleton';
@@ -31,16 +34,18 @@ export function formatDimensionRange(min: number | null | undefined, max: number
 export const DatasetDetailPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const { error } = useToast();
 
   const [dataset, setDataset] = useState<Dataset | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
-  const [activeTab, setActiveTab] = useState<'overview' | 'profile' | 'integrity' | 'distribution' | 'history'>('overview');
-  const [findings, setFindings] = useState<PersistedFinding[]>([]);
-  const [history, setHistory] = useState<Array<Record<string, unknown>>>([]);
-  const [tabLoading, setTabLoading] = useState(false);
-  const [tabError, setTabError] = useState('');
+  const requestedTab = searchParams.get('tab');
+  const initialTab = ['overview', 'profile', 'integrity', 'distribution', 'history'].includes(requestedTab ?? '')
+    ? requestedTab as 'overview' | 'profile' | 'integrity' | 'distribution' | 'history'
+    : 'overview';
+  const [activeTab, setActiveTab] = useState<'overview' | 'profile' | 'integrity' | 'distribution' | 'history'>(initialTab);
+  const [findingTotal, setFindingTotal] = useState<number | null>(null);
 
   useEffect(() => {
     async function load() {
@@ -53,6 +58,12 @@ export const DatasetDetailPage: React.FC = () => {
         const found = await getDatasetById(id);
         if (found) {
           setDataset(found);
+          try {
+            const findingsPage = await getFindingsPage(id, { limit: 1 });
+            setFindingTotal(findingsPage.datasetSummary.total);
+          } catch {
+            setFindingTotal(null);
+          }
         } else {
           error('Dataset Not Found', `Dataset with ID ${id} does not exist.`);
         }
@@ -65,24 +76,6 @@ export const DatasetDetailPage: React.FC = () => {
     }
     load();
   }, [id, error]);
-
-  useEffect(() => {
-    if (!id || !['integrity', 'history'].includes(activeTab)) return;
-    let active = true;
-    setTabLoading(true);
-    setTabError('');
-    const request = activeTab === 'integrity' ? getFindings(id) : getDatasetHistory(id);
-    request.then((data: any) => {
-      if (!active) return;
-      if (activeTab === 'integrity') setFindings(data);
-      else setHistory(data);
-    }).catch((failure: unknown) => {
-      if (active) setTabError(failure instanceof Error ? failure.message : 'Tab data could not be loaded.');
-    }).finally(() => {
-      if (active) setTabLoading(false);
-    });
-    return () => { active = false; };
-  }, [id, activeTab]);
 
   if (loading) {
     return (
@@ -134,11 +127,11 @@ export const DatasetDetailPage: React.FC = () => {
           {/* Action CTAs */}
           <div className="flex flex-wrap items-center gap-2 self-start lg:self-auto">
             <button
-              onClick={() => navigate(`/analysis/${dataset.id}`)}
+              onClick={() => navigate(`/analysis-setup/${dataset.id}`)}
               className="px-3.5 py-2 text-xs font-semibold rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white transition-colors flex items-center gap-1.5 shadow-xs"
             >
               <Play className="w-3.5 h-3.5" />
-              <span>Run Integrity Analysis</span>
+              <span>Analysis Setup</span>
             </button>
 
             <button
@@ -154,7 +147,7 @@ export const DatasetDetailPage: React.FC = () => {
               className="px-3.5 py-2 text-xs font-semibold rounded-lg bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 transition-colors flex items-center gap-1.5 shadow-2xs"
             >
               <Wrench className="w-3.5 h-3.5 text-teal-700" />
-              <span>Repair & Evaluate</span>
+              <span>Remediation Center</span>
             </button>
           </div>
         </div>
@@ -225,7 +218,7 @@ export const DatasetDetailPage: React.FC = () => {
                 onClick={() => navigate(`/leakage-analysis/${dataset.id}`)}
                 className="mt-1 text-sm font-semibold text-teal-700 hover:text-teal-900"
               >
-                {findings.length ? `${findings.length} findings · View` : 'View findings'}
+                {findingTotal !== null ? `${findingTotal.toLocaleString()} findings · View` : 'View findings'}
               </button>
               <span className="text-[10px] text-slate-500 block mt-0.5">Counts come from persisted finding records</span>
             </div>
@@ -352,51 +345,8 @@ export const DatasetDetailPage: React.FC = () => {
               Image archive counts and sampled dimensions, when available, are shown in the Overview.
               No annotation or label analysis is returned by this upload profiler.
             </p>
-          ) : dataset.columns?.length ? (
-            <div className="overflow-x-auto border border-slate-200 rounded-lg">
-              <table className="w-full text-left text-xs">
-                <thead className="bg-slate-50 text-slate-500 font-mono uppercase">
-                  <tr>
-                    <th className="px-4 py-2.5">Column Name</th>
-                    <th className="px-4 py-2.5">Data Type</th>
-                    <th className="px-4 py-2.5">Missing Count</th>
-                    <th className="px-4 py-2.5">Unique Values</th>
-                    <th className="px-4 py-2.5">Observed Statistics</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {dataset.columns.map((col) => (
-                    <tr key={col.name} className="hover:bg-slate-50/80">
-                      <td className="px-4 py-2.5 font-semibold text-slate-900 font-mono">{col.name}</td>
-                      <td className="px-4 py-2.5 text-slate-500 capitalize">{col.type}</td>
-                      <td className="px-4 py-2.5 font-mono tabular-nums text-slate-700">
-                        {typeof col.missingCount === 'number'
-                          ? `${col.missingCount.toLocaleString()}${
-                              typeof dataset.sampleCount === 'number' && dataset.sampleCount > 0
-                                ? ` (${((col.missingCount / dataset.sampleCount) * 100).toFixed(1)}%)`
-                                : ''
-                            }`
-                          : '—'}
-                      </td>
-                      <td className="px-4 py-2.5 font-mono tabular-nums text-slate-700">
-                        {typeof col.uniqueCount === 'number' ? col.uniqueCount.toLocaleString() : '—'}
-                      </td>
-                      <td className="px-4 py-2.5 text-slate-600">
-                        {col.statistics?.kind === 'numeric'
-                          ? `min ${col.statistics.min ?? '—'} · max ${col.statistics.max ?? '—'} · mean ${col.statistics.mean ?? '—'} · median ${col.statistics.median ?? '—'}`
-                          : col.statistics?.topValues?.length
-                            ? col.statistics.topValues.map((entry) => `${entry.value} (${entry.count})`).join(', ')
-                            : 'Unavailable'}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
           ) : (
-            <p className="rounded-lg border border-slate-200 bg-slate-50 p-4 text-xs text-slate-600">
-              No tabular column profile was returned for this dataset.
-            </p>
+            <FeatureProfiles dataset={dataset} />
           )}
         </div>
       )}
@@ -408,7 +358,7 @@ export const DatasetDetailPage: React.FC = () => {
             <div>
               <h3 className="text-sm font-semibold text-slate-900">Persisted Findings</h3>
               <p className="text-xs text-slate-500">
-                Finding records and available evidence are loaded in the Leakage Workspace.
+                Findings are filtered and paginated by the backend. Counts summarize persisted records, not detector execution coverage.
               </p>
             </div>
             <button
@@ -418,27 +368,7 @@ export const DatasetDetailPage: React.FC = () => {
               Open Leakage Workspace
             </button>
           </div>
-
-          {tabLoading && <p className="text-xs text-slate-500">Loading persisted findings…</p>}
-          {tabError && <p role="alert" className="text-xs text-rose-700">{tabError}</p>}
-          {!tabLoading && !tabError && (
-            <>
-              <p className="text-xs text-slate-600">
-                {findings.length} persisted findings · {findings.filter((item) => item.status.toLowerCase() === 'open').length} open
-              </p>
-              {findings.length === 0 ? <p className="rounded-lg border border-slate-200 bg-slate-50 p-4 text-xs text-slate-600">No findings are currently persisted for this dataset.</p> : (
-                <div className="divide-y divide-slate-100 rounded-lg border border-slate-200">
-                  {findings.map((finding) => (
-                    <button key={finding.id} onClick={() => navigate(`/leakage-analysis/${dataset.id}`)} className="w-full p-3 text-left hover:bg-slate-50">
-                      <span className="text-xs font-semibold text-slate-900">{finding.findingType.replaceAll('_', ' ')}</span>
-                      <span className="ml-2 text-[10px] uppercase text-slate-500">{finding.severity} · {finding.status}</span>
-                      <span className="mt-1 block text-xs text-slate-600">{finding.description}</span>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </>
-          )}
+          <PersistedFindingsBrowser datasetId={dataset.id} />
         </div>
       )}
 
@@ -467,18 +397,7 @@ export const DatasetDetailPage: React.FC = () => {
       {activeTab === 'history' && (
         <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-3 shadow-xs">
           <h3 className="text-sm font-semibold text-slate-900">Persisted dataset history</h3>
-          {tabLoading && <p className="text-xs text-slate-500">Loading history…</p>}
-          {tabError && <p role="alert" className="text-xs text-rose-700">{tabError}</p>}
-          {!tabLoading && !tabError && (history.length ? (
-            <div className="space-y-2">
-              {history.map((event, index) => (
-                <article key={String(event.id ?? index)} className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-                  <p className="text-xs font-semibold text-slate-900">{String(event.eventType ?? 'Activity').replaceAll('_', ' ')} · {String(event.outcome ?? 'recorded')}</p>
-                  <p className="mt-1 text-[11px] text-slate-500">{event.createdAt ? new Date(String(event.createdAt)).toLocaleString() : 'Timestamp unavailable'}</p>
-                </article>
-              ))}
-            </div>
-          ) : <p className="text-xs text-slate-600">No detailed event history has been recorded for this dataset yet. Older events are not fabricated.</p>)}
+          <DatasetHistoryTimeline datasetId={dataset.id} />
         </div>
       )}
     </div>

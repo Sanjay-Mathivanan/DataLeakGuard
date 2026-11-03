@@ -596,6 +596,11 @@ def test_cross_user_access_denied_for_owned_resources_and_writes(auth_client):
         headers=headers,
     ).status_code == 404
     assert auth_client.post(
+        "/api/v1/datasets/private-dataset/repairs/combined/preview",
+        headers=headers,
+        json={"selected_finding_ids": ["private-finding"]},
+    ).status_code == 404
+    assert auth_client.post(
         "/api/v1/datasets/private-dataset/repairs/combined",
         headers=headers,
         json={"selected_finding_ids": ["private-finding"]},

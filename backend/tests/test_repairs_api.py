@@ -52,6 +52,8 @@ def test_repair_finding_success(client, test_db):
     # Verify repair result
     assert repair_result["status"] == "completed"
     assert repair_result["operation_type"] == "repair"
+    assert repair_result["operation_metadata"]["skipped_findings"] == []
+    assert repair_result["operation_metadata"]["skipped_findings_recorded"] is True
     assert repair_result["dataset_id"] == dataset_id
     assert repair_result["finding_id"] == finding_id
     assert repair_result["affected_rows"] == 2  # Two duplicate rows removed (keeping first occurrence)
@@ -295,6 +297,8 @@ def test_get_repair_success(client, test_db):
     assert retrieved_repair["affected_rows"] == repair_result["affected_rows"]
     assert retrieved_repair["affected_columns"] == repair_result["affected_columns"]
     assert retrieved_repair["quarantine_info"] == repair_result["quarantine_info"]
+    assert retrieved_repair["operation_metadata"]["skipped_findings"] == []
+    assert retrieved_repair["operation_metadata"]["skipped_findings_recorded"] is True
 
 
 def test_get_repair_not_found(client, test_db):
@@ -362,6 +366,83 @@ def test_get_dataset_repairs_success(client, test_db):
     assert retrieved_repair["affected_rows"] == repair_result["affected_rows"]
     assert retrieved_repair["affected_columns"] == repair_result["affected_columns"]
     assert retrieved_repair["quarantine_info"] == repair_result["quarantine_info"]
+    assert retrieved_repair["operation_metadata"]["skipped_findings"] == []
+    assert retrieved_repair["operation_metadata"]["skipped_findings_recorded"] is True
+
+
+def test_history_normalizes_legacy_missing_null_and_partial_operation_metadata(client, test_db):
+    upload = client.post(
+        f"{API_V1_STR}/datasets",
+        data={
+            "name": "legacy operation metadata",
+            "type": "tabular",
+            "format": "CSV",
+            "description": "isolated serializer fixture",
+        },
+        files={"file": ("legacy.csv", b"value\none\ntwo\n", "text/csv")},
+    )
+    assert upload.status_code == 201, upload.text
+    dataset_id = upload.json()["id"]
+    from app.db.session import TestingSessionLocal
+
+    db = TestingSessionLocal()
+    try:
+        db.add_all([
+            models.RepairRecord(
+                id="legacy-missing-skips",
+                dataset_id=dataset_id,
+                operation_type="split_generation",
+                status="completed",
+                input_file_sha256="input-digest",
+                operation_metadata={"strategy": "generated", "random_seed": 4},
+            ),
+            models.RepairRecord(
+                id="legacy-null-metadata",
+                dataset_id=dataset_id,
+                operation_type="repair",
+                status="failed",
+                input_file_sha256="input-digest",
+                operation_metadata=None,
+            ),
+            models.RepairRecord(
+                id="partial-null-skips",
+                dataset_id=dataset_id,
+                operation_type="quarantine",
+                status="partial",
+                input_file_sha256="input-digest",
+                operation_metadata={"failure_reason": "output unavailable", "skipped_findings": None},
+            ),
+        ])
+        db.commit()
+    finally:
+        db.close()
+
+    response = client.get(f"{API_V1_STR}/datasets/{dataset_id}/repairs")
+    assert response.status_code == 200, response.text
+    by_id = {record["id"]: record for record in response.json()}
+    assert by_id["legacy-missing-skips"]["operation_metadata"] == {
+        "strategy": "generated",
+        "random_seed": 4,
+        "skipped_findings": [],
+        "skipped_findings_recorded": False,
+    }
+    assert by_id["legacy-null-metadata"]["operation_metadata"] == {
+        "skipped_findings": [],
+        "skipped_findings_recorded": False,
+    }
+    assert by_id["partial-null-skips"]["operation_metadata"]["skipped_findings"] == []
+    assert by_id["partial-null-skips"]["operation_metadata"]["skipped_findings_recorded"] is False
+    timeline = client.get(f"{API_V1_STR}/datasets/{dataset_id}/history")
+    assert timeline.status_code == 200, timeline.text
+    timeline_operation = next(
+        item for item in timeline.json()
+        if item["operation_id"] == "legacy-missing-skips"
+    )
+    assert timeline_operation["details"]["skipped_findings"] == []
+    assert (
+        timeline_operation["details"]["skipped_findings_recorded"]
+        is False
+    )
 
 
 def test_get_dataset_repairs_unknown_dataset(client, test_db):
@@ -678,7 +759,7 @@ def test_repair_malformed_missing_evidence(client, test_db):
         # Attempt repair with malformed evidence
         response = client.post(f"/api/v1/findings/{malformed_finding.id}/repair")
         assert response.status_code == 400
-        assert "Evidence missing required duplicate information" in response.json()["detail"]
+        assert "Duplicate evidence is missing or malformed" in response.json()["detail"]
 
         # Now test with missing row_indices
         malformed_finding2 = leakage_models.LeakageFinding(
@@ -695,7 +776,7 @@ def test_repair_malformed_missing_evidence(client, test_db):
 
         response = client.post(f"/api/v1/findings/{malformed_finding2.id}/repair")
         assert response.status_code == 400
-        assert "Evidence missing required duplicate information" in response.json()["detail"]
+        assert "Duplicate evidence is missing or malformed" in response.json()["detail"]
 
         # Now test with invalid row_indices type
         malformed_finding3 = leakage_models.LeakageFinding(
@@ -712,7 +793,7 @@ def test_repair_malformed_missing_evidence(client, test_db):
 
         response = client.post(f"/api/v1/findings/{malformed_finding3.id}/repair")
         assert response.status_code == 400
-        assert "Invalid evidence format" in response.json()["detail"]  # This comes from the isinstance check
+        assert "Duplicate evidence is missing or malformed" in response.json()["detail"]
 
     finally:
         db.close()

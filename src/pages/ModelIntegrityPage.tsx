@@ -15,7 +15,7 @@ import {
   Check
 } from 'lucide-react';
 import { Model } from '../types';
-import { getModels, verifyModel } from '../services/api';
+import { downloadModelArtifact, getModels, uploadModelArtifact, verifyModel } from '../services/api';
 import { StatusBadge } from '../components/common/StatusBadge';
 import { TableSkeleton } from '../components/common/LoadingSkeleton';
 import { useToast } from '../context/ToastContext';
@@ -29,6 +29,10 @@ export const ModelIntegrityPage: React.FC = () => {
   const [verificationFeedback, setVerificationFeedback] = useState<string | null>(null);
   const [uploadModalOpen, setUploadModalOpen] = useState(false);
   const [copiedHash, setCopiedHash] = useState(false);
+  const [artifactFile, setArtifactFile] = useState<File | null>(null);
+  const [artifactName, setArtifactName] = useState('');
+  const [artifactVersion, setArtifactVersion] = useState('');
+  const [isUploading, setIsUploading] = useState(false);
 
   useEffect(() => {
     async function load() {
@@ -74,6 +78,28 @@ export const ModelIntegrityPage: React.FC = () => {
     info('Copied', 'Hash copied to clipboard.');
   };
 
+  const handleUpload = async () => {
+    if (!artifactFile || !artifactName.trim()) {
+      error('Artifact Required', 'Select a file and provide an artifact name.');
+      return;
+    }
+    setIsUploading(true);
+    try {
+      const artifact = await uploadModelArtifact(artifactFile, artifactName.trim(), artifactVersion.trim() || undefined);
+      setModels((current) => [artifact, ...current]);
+      setSelectedModel(artifact);
+      setUploadModalOpen(false);
+      setArtifactFile(null);
+      setArtifactName('');
+      setArtifactVersion('');
+      success('Model Artifact Registered', `SHA-256 ${artifact.sha256} was persisted.`);
+    } catch (uploadError) {
+      error('Artifact Upload Failed', uploadError instanceof Error ? uploadError.message : 'Could not register artifact.');
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
   return (
     <div className="space-y-6 animate-in fade-in duration-200">
       {/* Header */}
@@ -86,7 +112,7 @@ export const ModelIntegrityPage: React.FC = () => {
             Model Integrity & Fingerprinting
           </h1>
           <p className="text-xs text-slate-500 mt-1">
-            Validate neural weights, cryptographic SHA-256 hashes, and golden reference behaviors.
+            Register artifacts and verify their persisted SHA-256 hashes. Behavioral model checks are not configured.
           </p>
         </div>
 
@@ -171,6 +197,17 @@ export const ModelIntegrityPage: React.FC = () => {
                         >
                           Verify
                         </button>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            downloadModelArtifact(m.id).catch((downloadError) =>
+                              error('Download Error', downloadError instanceof Error ? downloadError.message : 'Could not download artifact.')
+                            );
+                          }}
+                          className="ml-2 px-2.5 py-1 text-xs font-semibold rounded border border-slate-300 text-slate-700 hover:bg-slate-50"
+                        >
+                          Download
+                        </button>
                       </td>
                     </tr>
                   );
@@ -245,19 +282,19 @@ export const ModelIntegrityPage: React.FC = () => {
             </button>
           </div>
 
-          {/* Three Integrity Checks Breakdown */}
+          {/* Hash verification status */}
           <div className="lg:col-span-2 space-y-4">
             <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-4 shadow-xs">
               <div className="flex items-center justify-between pb-3 border-b border-slate-200">
                 <h3 className="text-sm font-semibold text-slate-900">
-                  Tripartite Integrity Checks
+                  Artifact Verification
                 </h3>
                 <span className="text-xs font-mono text-slate-500">
-                  Configured Test Suite
+                  SHA-256 only
                 </span>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <div className="grid grid-cols-1 gap-3">
                 {/* Check 1 */}
                 <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-lg space-y-1.5">
                   <div className="flex items-center justify-between">
@@ -276,74 +313,10 @@ export const ModelIntegrityPage: React.FC = () => {
                   </p>
                 </div>
 
-                {/* Check 2 */}
-                <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-lg space-y-1.5">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[11px] font-mono text-slate-500">Check 02</span>
-                    {selectedModel.fingerprintMatch ? (
-                      <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-                    ) : (
-                      <AlertTriangle className="w-4 h-4 text-amber-600" />
-                    )}
-                  </div>
-                  <h4 className="text-xs font-semibold text-slate-900">Model Fingerprint</h4>
-                  <p className="text-[11px] text-slate-600 leading-normal">
-                    {selectedModel.fingerprintMatch
-                      ? 'Layer graph signature and tensor rank verified.'
-                      : 'Operator topology drift detected in intermediate nodes.'}
-                  </p>
-                </div>
-
-                {/* Check 3 */}
-                <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-lg space-y-1.5">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[11px] font-mono text-slate-500">Check 03</span>
-                    {selectedModel.behaviorDriftScore < 0.05 ? (
-                      <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-                    ) : (
-                      <AlertTriangle className="w-4 h-4 text-amber-600" />
-                    )}
-                  </div>
-                  <h4 className="text-xs font-semibold text-slate-900">Behavioral Golden Test</h4>
-                  <p className="text-[11px] text-slate-600 leading-normal">
-                    Drift score: {selectedModel.behaviorDriftScore} (Threshold &lt; 0.05).
-                  </p>
-                </div>
               </div>
 
-              {/* Reference Behavior Comparison Table */}
-              <div className="pt-2">
-                <h4 className="text-xs font-semibold text-slate-700 font-mono uppercase tracking-wider mb-2">
-                  Golden Reference Input Tests (Behavioral Probe)
-                </h4>
-                <div className="overflow-x-auto border border-slate-200 rounded-lg">
-                  <table className="w-full text-left text-xs">
-                    <thead className="bg-slate-50 text-slate-600 font-mono uppercase">
-                      <tr>
-                        <th className="px-3 py-2">Test Vector</th>
-                        <th className="px-3 py-2">Expected Output</th>
-                        <th className="px-3 py-2">Actual Output</th>
-                        <th className="px-3 py-2 text-right">Result</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100">
-                      {selectedModel.referenceBehaviors.map((b, i) => (
-                        <tr key={i} className="hover:bg-slate-50/80">
-                          <td className="px-3 py-2 font-mono text-teal-700">{b.testInput}</td>
-                          <td className="px-3 py-2 text-slate-700 font-mono">{b.expectedOutput}</td>
-                          <td className="px-3 py-2 text-slate-700 font-mono">{b.actualOutput}</td>
-                          <td className="px-3 py-2 text-right">
-                            {b.match ? (
-                              <span className="text-[10px] font-mono text-emerald-600 font-bold uppercase">Pass</span>
-                            ) : (
-                              <span className="text-[10px] font-mono text-rose-600 font-bold uppercase">Drift</span>
-                            )}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+              <div className="pt-2 text-xs text-slate-600">
+                Behavioral fingerprinting, golden-vector execution, and model inference are not configured.
               </div>
             </div>
 
@@ -352,7 +325,7 @@ export const ModelIntegrityPage: React.FC = () => {
               <Info className="w-4 h-4 text-teal-700 shrink-0 mt-0.5" />
               <p className="leading-relaxed">
                 <strong className="text-slate-800">Methodology Limitations:</strong>{' '}
-                Model integrity checks depend on the model format and available access. Behavioral verification does not prove absence of all possible attacks. Verification is certified under configured test parameters.
+                SHA-256 verification confirms that the stored bytes match the registered digest. It does not prove model safety, accuracy, or behavioral integrity.
               </p>
             </div>
           </div>
@@ -365,10 +338,20 @@ export const ModelIntegrityPage: React.FC = () => {
           <div className="bg-white border border-slate-200 rounded-2xl max-w-md w-full p-6 shadow-2xl relative">
             <h3 className="text-base font-bold text-slate-900 font-mono mb-2">Register New Model Artifact</h3>
             <p className="text-xs text-slate-500 mb-4">Supported formats: ONNX (.onnx), PyTorch (.pt, .pth), TorchScript (.torchscript)</p>
-            <div className="border-2 border-dashed border-slate-300 rounded-xl p-6 text-center mb-4 bg-slate-50/50">
+            <label className="border-2 border-dashed border-slate-300 rounded-xl p-6 text-center mb-4 bg-slate-50/50 block cursor-pointer">
               <Upload className="w-6 h-6 text-slate-400 mx-auto mb-2" />
-              <p className="text-xs font-semibold text-slate-900">Drag and drop model binary</p>
+              <p className="text-xs font-semibold text-slate-900">{artifactFile?.name ?? 'Select model binary'}</p>
               <p className="text-[10px] text-slate-500 mt-1">Automatic SHA-256 digest computation</p>
+              <input
+                type="file"
+                accept=".onnx,.pt,.pth,.torchscript"
+                className="sr-only"
+                onChange={(event) => setArtifactFile(event.target.files?.[0] ?? null)}
+              />
+            </label>
+            <div className="grid grid-cols-2 gap-3 mb-4">
+              <input value={artifactName} onChange={(event) => setArtifactName(event.target.value)} placeholder="Artifact name" className="px-3 py-2 border border-slate-200 rounded-lg text-xs" />
+              <input value={artifactVersion} onChange={(event) => setArtifactVersion(event.target.value)} placeholder="Version (optional)" className="px-3 py-2 border border-slate-200 rounded-lg text-xs" />
             </div>
             <div className="flex justify-end gap-2">
               <button
@@ -378,13 +361,11 @@ export const ModelIntegrityPage: React.FC = () => {
                 Cancel
               </button>
               <button
-                onClick={() => {
-                  setUploadModalOpen(false);
-                  success('Model Artifact Ingested', 'Binary digest registered in vault.');
-                }}
+                onClick={handleUpload}
+                disabled={isUploading}
                 className="px-4 py-1.5 text-xs font-semibold rounded-lg bg-teal-700 hover:bg-teal-800 text-white transition-colors shadow-xs"
               >
-                Register Artifact
+                {isUploading ? 'Registering...' : 'Register Artifact'}
               </button>
             </div>
           </div>

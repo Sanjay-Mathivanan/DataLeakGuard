@@ -10,17 +10,7 @@ import {
   BarChart2,
   CheckCircle2
 } from 'lucide-react';
-import {
-  BarChart,
-  Bar,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  Legend,
-  ResponsiveContainer
-} from 'recharts';
-import { getImpactAnalysis } from '../services/api';
+import { getDatasets, getImpactAnalysis } from '../services/api';
 import { ImpactAnalysis } from '../types';
 import { CardSkeleton } from '../components/common/LoadingSkeleton';
 
@@ -28,18 +18,24 @@ export const ImpactAnalysisPage: React.FC = () => {
   const navigate = useNavigate();
   const [data, setData] = useState<ImpactAnalysis | null>(null);
   const [loading, setLoading] = useState(true);
+  const [datasetId, setDatasetId] = useState('');
+  const [datasets, setDatasets] = useState<Awaited<ReturnType<typeof getDatasets>>>([]);
 
   useEffect(() => {
     async function load() {
       try {
-        const res = await getImpactAnalysis('ds-adult-income');
+        const datasets = await getDatasets();
+        if (datasets.length === 0) return;
+        setDatasets(datasets);
+        setDatasetId((current) => current || datasets[0].id);
+        const res = await getImpactAnalysis(datasetId || datasets[0].id);
         setData(res);
       } finally {
         setLoading(false);
       }
     }
     load();
-  }, []);
+  }, [datasetId]);
 
   if (loading || !data) {
     return (
@@ -50,35 +46,36 @@ export const ImpactAnalysisPage: React.FC = () => {
     );
   }
 
-  const chartData = data.metrics.map((m) => ({
-    metric: m.metric,
-    contaminated: m.contaminated,
-    corrected: m.corrected,
-    inflation: m.difference
-  }));
-
   return (
     <div className="space-y-6 animate-in fade-in duration-200">
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <span className="text-xs font-mono text-teal-700 uppercase tracking-wider font-semibold">
-            Research Evaluation Delta
+            Persisted Impact Metrics
           </span>
           <h1 className="text-2xl font-bold tracking-tight text-slate-900 font-mono mt-1">
-            Performance Impact & Inflation Analysis
+            Findings & Operations Impact
           </h1>
           <p className="text-xs text-slate-500 mt-1">
-            Quantify the empirical evaluation inflation caused by cross-boundary leakage and duplicates.
+            Review persisted findings and repair-operation counts. This workflow does not evaluate model accuracy.
           </p>
         </div>
+        <select
+          aria-label="Impact dataset"
+          value={datasetId}
+          onChange={(event) => setDatasetId(event.target.value)}
+          className="px-3 py-2 text-xs border border-slate-200 rounded-lg bg-white"
+        >
+          {datasets.map((dataset) => <option key={dataset.id} value={dataset.id}>{dataset.name}</option>)}
+        </select>
 
         <button
           onClick={() => navigate('/reports/REP-2026-0042')}
           className="px-4 py-2 text-xs font-semibold rounded-lg bg-teal-700 hover:bg-teal-800 text-white transition-colors flex items-center gap-2 self-start sm:self-auto shadow-xs"
         >
           <FileText className="w-4 h-4" />
-          <span>Generate Assurance Report</span>
+          <span>Generate Persisted Report</span>
         </button>
       </div>
 
@@ -91,29 +88,29 @@ export const ImpactAnalysisPage: React.FC = () => {
                 Assurance Metric Highlight
               </span>
               <span className="text-[10px] px-2 py-0.5 rounded bg-slate-100 text-slate-700 font-mono border border-slate-200">
-                Controlled Contamination Scenario
+                Persisted operational counts
               </span>
             </div>
 
             <h2 className="text-xl md:text-2xl font-bold font-mono text-slate-900">
-              Estimated Evaluation Inflation: +{data.evaluationInflationSummary.accuracyDifference.toFixed(1)}% Accuracy Drop
+            No model-performance claim is made
             </h2>
 
             <p className="text-xs text-slate-600 leading-relaxed">
-              <strong className="text-amber-800">Observed difference between contaminated and corrected evaluation:</strong>{' '}
-              The model achieved 97.8% accuracy on the raw contaminated split, but true generalization dropped to 90.4% when exact duplicates and household entity overlap were quarantined.
+              <strong className="text-amber-800">Persisted operational metrics:</strong>{' '}
+              Counts below are derived from owned findings and operations; no contaminated-versus-corrected accuracy comparison is generated.
             </p>
           </div>
 
           <div className="flex items-center gap-4 shrink-0 bg-slate-50 p-4 rounded-xl border border-slate-200 shadow-2xs">
             <div className="text-center px-2">
-              <span className="text-[11px] text-slate-500 block font-mono">Contaminated</span>
-              <span className="text-2xl font-bold font-mono text-rose-600 tabular-nums">97.8%</span>
+              <span className="text-[11px] text-slate-500 block font-mono">Findings</span>
+              <span className="text-2xl font-bold font-mono text-rose-600 tabular-nums">{data.metrics[0]?.contaminated ?? 0}</span>
             </div>
             <span className="text-slate-400 text-xl font-mono">→</span>
             <div className="text-center px-2">
-              <span className="text-[11px] text-slate-500 block font-mono">Corrected</span>
-              <span className="text-2xl font-bold font-mono text-emerald-600 tabular-nums">90.4%</span>
+              <span className="text-[11px] text-slate-500 block font-mono">Affected rows</span>
+              <span className="text-2xl font-bold font-mono text-emerald-600 tabular-nums">{data.metrics[4]?.contaminated ?? 0}</span>
             </div>
           </div>
         </div>
@@ -151,64 +148,31 @@ export const ImpactAnalysisPage: React.FC = () => {
         ))}
       </div>
 
-      {/* Comparison Chart */}
       <div className="bg-white border border-slate-200 rounded-xl p-6 shadow-xs">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-6">
-          <div>
-            <h3 className="text-sm font-semibold text-slate-900">
-              Metric Comparison: Contaminated vs Sanitized Evaluation
-            </h3>
-            <p className="text-xs text-slate-500">
-              Side-by-side benchmarking reveals artificial performance buffer in unverified pipelines.
-            </p>
-          </div>
-          <span className="text-xs font-mono text-slate-500">
-            Model: {data.modelName}
-          </span>
-        </div>
-
-        <div className="h-72 w-full">
-          <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={chartData} margin={{ top: 10, right: 10, left: -10, bottom: 5 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-              <XAxis dataKey="metric" stroke="#64748b" fontSize={12} />
-              <YAxis domain={[80, 100]} stroke="#64748b" fontSize={11} />
-              <Tooltip
-                contentStyle={{ backgroundColor: '#ffffff', borderColor: '#e2e8f0', color: '#0f172a', borderRadius: '8px', fontSize: '12px', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
-                formatter={(val: any) => [`${val}%`]}
-              />
-              <Legend wrapperStyle={{ fontSize: '12px', paddingTop: '10px' }} />
-              <Bar name="Contaminated Benchmark (Artificial Buffer)" dataKey="contaminated" fill="#e11d48" radius={[4, 4, 0, 0]} />
-              <Bar name="Sanitized Partition (True Generalization)" dataKey="corrected" fill="#059669" radius={[4, 4, 0, 0]} />
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
+        <h3 className="text-sm font-semibold text-slate-900">Persisted metric interpretation</h3>
+        <p className="text-xs text-slate-600 mt-2">
+          The values above are counts from this dataset&apos;s persisted findings and operations. No contaminated-versus-sanitized
+          evaluation or model-performance comparison is available.
+        </p>
       </div>
 
-      {/* Explanation Box */}
       <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-3 shadow-xs">
         <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-800 font-mono flex items-center gap-2">
           <ShieldCheck className="w-4 h-4 text-teal-700" />
-          <span>Research Methodology & Leakage Breakdown</span>
+          <span>Metric scope and limitations</span>
         </h4>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs text-slate-600 leading-relaxed">
           <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
-            <span className="text-slate-900 font-semibold block mb-1">1. Exact Duplicate Collisions</span>
-            <p>
-              142 identical rows appearing in both training and test folds allowed nearest-neighbor memorization rather than actual pattern generalization.
-            </p>
+            <span className="text-slate-900 font-semibold block mb-1">Persisted findings</span>
+            <p>Counts include only findings currently persisted for the selected owned dataset.</p>
           </div>
           <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
-            <span className="text-slate-900 font-semibold block mb-1">2. Demographic Identity Leak</span>
-            <p>
-              38 household clusters shared identical weights and census attributes across split boundaries, allowing demographic overfitting.
-            </p>
+            <span className="text-slate-900 font-semibold block mb-1">Persisted operations</span>
+            <p>Operation and affected-row counts are read from persisted repair and quarantine records.</p>
           </div>
           <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
-            <span className="text-slate-900 font-semibold block mb-1">3. Preprocessing Transfusion</span>
-            <p>
-              Global standardization statistics were calculated over the entire dataset prior to folding, subtly leaking test fold distribution variance.
-            </p>
+            <span className="text-slate-900 font-semibold block mb-1">No model evaluation</span>
+            <p>Accuracy, F1, ROC-AUC, causal impact, and generalization claims are outside this workflow.</p>
           </div>
         </div>
       </div>

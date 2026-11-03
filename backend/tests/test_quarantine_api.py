@@ -69,6 +69,17 @@ def test_quarantine_finding_success(client, test_db):
     assert quarantine_result["quarantine_info"]["finding_type"] == "exact_duplicate"
     assert set(quarantine_result["quarantine_info"]["row_indices"]) == {0, 2, 4}
     assert quarantine_result["quarantine_info"]["affected_row_count"] == 3
+    assert quarantine_result["operation_metadata"]["skipped_findings"] == []
+    assert quarantine_result["operation_metadata"]["skipped_findings_recorded"] is False
+
+    operation_id = quarantine_result["quarantine_id"]
+    single_history = client.get(f"/api/v1/quarantines/{operation_id}")
+    assert single_history.status_code == 200
+    assert single_history.json()["operation_metadata"]["skipped_findings"] == []
+    assert single_history.json()["operation_metadata"]["skipped_findings_recorded"] is False
+    dataset_history = client.get(f"/api/v1/datasets/{dataset_id}/quarantines")
+    assert dataset_history.status_code == 200
+    assert dataset_history.json()[0]["operation_metadata"]["skipped_findings"] == []
 
     # Verify original file unchanged
     original_path = ORIGINAL_DIR / storage_filename

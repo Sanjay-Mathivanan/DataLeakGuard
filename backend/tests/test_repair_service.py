@@ -57,6 +57,17 @@ def test_repair_exact_duplicates(client, test_db):
     assert repair_result["finding_id"] == finding_id
     assert repair_result["affected_rows"] == 2  # Two duplicate rows removed (keeping first occurrence)
     assert repair_result["affected_columns"] == []
+    assert repair_result["operation_metadata"]["repair_strategy"] == "exact_duplicate_keep_first"
+    assert repair_result["operation_metadata"]["verification_status"] == "verified"
+    assert repair_result["operation_metadata"]["verification"] == {
+        "input_file_hash_checked": True,
+        "evidence_matches_input": True,
+        "output_sha256": repair_result["output_file_sha256"],
+        "output_readable": True,
+        "output_schema_matches": True,
+        "output_row_count": 3,
+        "remaining_evidenced_duplicate_rows": 1,
+    }
 
     # Verify original file unchanged
     original_path = ORIGINAL_DIR / storage_filename
@@ -134,6 +145,44 @@ def test_repair_exact_duplicates(client, test_db):
     assert df_processed.iloc[0]['name'] == 'Alice' and df_processed.iloc[0]['age'] == 30
     assert df_processed.iloc[1]['name'] == 'Bob' and df_processed.iloc[1]['age'] == 25
     assert df_processed.iloc[2]['name'] == 'Charlie' and df_processed.iloc[2]['age'] == 40
+
+
+def test_repair_rejects_stale_duplicate_evidence_without_creating_output(client, test_db):
+    csv_content = b"name,age\nAlice,30\nBob,25\nAlice,30\nCharlie,40\n"
+    upload = client.post(
+        f"{API_V1_STR}/datasets",
+        data={
+            "name": "stale evidence repair",
+            "type": "tabular",
+            "format": "CSV",
+            "description": "test",
+        },
+        files={"file": ("stale.csv", csv_content, "text/csv")},
+    )
+    assert upload.status_code == 201
+    dataset = upload.json()
+    analysis = client.post(f"{API_V1_STR}/datasets/{dataset['id']}/analyze/leakage")
+    assert analysis.status_code == 200
+    finding_id = analysis.json()["findings"][0]["id"]
+
+    from app.db.session import TestingSessionLocal
+
+    db = TestingSessionLocal()
+    finding = db.query(leakage_models.LeakageFinding).filter_by(id=finding_id).first()
+    finding.evidence = {
+        **finding.evidence,
+        "row_indices": [0, 1],
+        "duplicate_count": 2,
+    }
+    db.commit()
+    db.close()
+
+    response = client.post(f"{API_V1_STR}/findings/{finding_id}/repair")
+    assert response.status_code == 409
+    assert "Duplicate evidence no longer matches" in response.json()["detail"]
+    assert list(PROCESSED_DIR.iterdir()) == []
+    original_path = ORIGINAL_DIR / dataset["storage_filename"]
+    assert original_path.read_bytes() == csv_content
 
 
 def test_repair_no_duplicates(client, test_db):
