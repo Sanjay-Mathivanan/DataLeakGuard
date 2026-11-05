@@ -1,13 +1,18 @@
 from sqlalchemy.orm import Session
 from app.db import models
 from app.utils.file_storage import save_upload_file, compute_file_sha256, get_file_path
-from app.utils.profiling.tabular import profile_tabular
 from app.utils.profiling.image_zip import profile_image_zip
+from app.services.profiling_service import (
+    build_dataset_column_metadata,
+    profile_dataframe,
+    read_tabular_frame,
+)
 from app.core.config import settings
 import json
 import os
 import pandas as pd
 from pathlib import Path
+from datetime import date, datetime
 from app.utils.file_storage import validate_upload_file
 
 
@@ -35,6 +40,21 @@ def _remove_unreferenced_upload(
         except OSError:
             pass
 
+
+def _json_preview_value(value):
+    """Convert pandas/numpy scalars to values accepted by the JSON column."""
+    if pd.isna(value):
+        return None
+    if isinstance(value, (datetime, date, pd.Timestamp)):
+        return value.isoformat()
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except (TypeError, ValueError):
+            pass
+    return value
+
+
 def create_dataset_from_upload(
     db: Session,
     *,
@@ -59,11 +79,18 @@ def create_dataset_from_upload(
         max_size_mb=getattr(settings, "MAX_UPLOAD_SIZE_MB", 100)
     )
 
-    # Profile based on type/format
+    # Profile based on type/format. Tabular uploads are read once; the same
+    # frame feeds the detailed profile, legacy column metadata, and preview.
     profile = {}
+    tabular_frame = None
     try:
         if dataset_type == "tabular" and format.upper() in {"CSV", "XLSX"}:
-            profile = profile_tabular(storage_path)
+            tabular_frame = read_tabular_frame(storage_path)
+            profile = profile_dataframe(
+                tabular_frame,
+                storage_path,
+                dataset_name=name,
+            )
         elif dataset_type == "computer-vision" and format.upper() == "ZIP":
             profile = profile_image_zip(storage_path)
         else:
@@ -82,66 +109,26 @@ def create_dataset_from_upload(
     preview_rows = None
     cv_stats = None
 
-    # For tabular datasets with successful profiling, compute additional metadata
-    if dataset_type == "tabular" and format.upper() in {"CSV", "XLSX"} and "error" not in profile:
+    # Preserve the existing dataset response shape while deriving its values
+    # from the same detailed profile.
+    if (
+        dataset_type == "tabular"
+        and format.upper() in {"CSV", "XLSX"}
+        and "error" not in profile
+        and tabular_frame is not None
+    ):
         try:
-            # Read the file to get dataframe for column details and preview
-            if storage_path.lower().endswith('.csv'):
-                df = pd.read_csv(storage_path)
-            else:  # .xlsx
-                df = pd.read_excel(storage_path)
-
-            # Use profile counts if available (should match dataframe)
-            sample_count = profile.get("row_count", len(df))
-            feature_count = profile.get("column_count", len(df.columns))
-
-            # Build columns list with name, type, missingCount, uniqueCount
-            columns_list = []
-            for col in df.columns:
-                missing_count = int(df[col].isna().sum())
-                # Unique count of non-missing values
-                unique_count_non_missing = int(df[col].dropna().nunique())
-                col_type = str(df[col].dtype)
-                column_profile = {
-                    "name": str(col),
-                    "type": col_type,
-                    "missingCount": missing_count,
-                    "uniqueCount": unique_count_non_missing
+            sample_count = int(profile.get("row_count", len(tabular_frame)))
+            feature_count = int(profile.get("column_count", len(tabular_frame.columns)))
+            columns = build_dataset_column_metadata(profile)
+            preview_rows = [
+                {
+                    str(column): _json_preview_value(value)
+                    for column, value in row.items()
                 }
-
-                if pd.api.types.is_numeric_dtype(df[col]):
-                    numeric_values = pd.to_numeric(df[col], errors="coerce").dropna()
-
-                    def finite_number(value):
-                        if pd.isna(value):
-                            return None
-                        converted = float(value)
-                        return converted if pd.notna(converted) and abs(converted) != float("inf") else None
-
-                    column_profile["statistics"] = {
-                        "kind": "numeric",
-                        "min": finite_number(numeric_values.min()) if not numeric_values.empty else None,
-                        "max": finite_number(numeric_values.max()) if not numeric_values.empty else None,
-                        "mean": finite_number(numeric_values.mean()) if not numeric_values.empty else None,
-                        "median": finite_number(numeric_values.median()) if not numeric_values.empty else None,
-                    }
-                else:
-                    value_counts = df[col].dropna().astype(str).value_counts().head(10)
-                    column_profile["statistics"] = {
-                        "kind": "categorical",
-                        "topValues": [
-                            {"value": str(value), "count": int(count)}
-                            for value, count in value_counts.items()
-                        ],
-                    }
-
-                columns_list.append(column_profile)
-            columns = columns_list
-
-            # Preview rows (first 6) with NaN replaced by None
-            preview_df = df.head(6).apply(lambda col: col.map(lambda x: None if pd.isna(x) else x))
-            preview_rows = preview_df.to_dict(orient='records')
-        except Exception as e:
+                for row in tabular_frame.head(6).to_dict(orient="records")
+            ]
+        except Exception:
             # If any error occurs in computing extra fields, leave them as None
             pass
 

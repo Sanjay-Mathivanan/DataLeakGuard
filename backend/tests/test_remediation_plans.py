@@ -51,6 +51,34 @@ def add_finding(
         db.close()
 
 
+def set_analysis_configuration(
+    dataset_id: str,
+    *,
+    target_column: str | None,
+    entity_column: str | None,
+    time_column: str | None,
+    split_column: str | None,
+    split_strategy: dict,
+) -> None:
+    db = app.db.session.TestingSessionLocal()
+    try:
+        dataset = db.query(models.Dataset).filter(models.Dataset.id == dataset_id).first()
+        assert dataset is not None
+        profile = dict(dataset.profile or {})
+        profile["analysis_columns"] = {
+            "target_column": target_column,
+            "entity_column": entity_column,
+            "time_column": time_column,
+            "split_column": split_column,
+        }
+        profile["split_strategy"] = split_strategy
+        dataset.profile = profile
+        db.add(dataset)
+        db.commit()
+    finally:
+        db.close()
+
+
 def preview(client, dataset_id: str, actions: list[dict]) -> dict:
     response = client.post(
         f"/api/v1/datasets/{dataset_id}/remediation-plans/preview",
@@ -181,6 +209,12 @@ def test_target_leakage_excludes_only_confirmed_feature_and_preserves_target(cli
         ],
     )
     assert result["plan"]["excluded_feature_columns"] == ["confirmed_leak"]
+    assert result["plan"]["feature_exclusion_reasons"]["confirmed_leak"]["finding_ids"] == [
+        "target-exclusion-finding"
+    ]
+    assert result["plan"]["analysis_configuration"]["target_column"] is None
+    assert result["plan"]["missing_value_counts_before"] == {}
+    assert result["plan"]["missing_value_counts_after"] == {}
 
     completed = execute(client, dataset["id"], result)
     assert completed.status_code == 201, completed.text
@@ -192,6 +226,17 @@ def test_target_leakage_excludes_only_confirmed_feature_and_preserves_target(cli
     assert list(cleaned.columns) == ["id", "target", "ordinary"]
     assert cleaned["target"].tolist() == ["yes", "no"]
     assert operation["plan"]["verification"]["checks"]["selected_target_preserved"]
+    assert operation["plan"]["verification"]["checks"]["selected_target_features_excluded"]
+    assert operation["plan"]["verified_finding_ids"] == ["target-exclusion-finding"]
+    db = app.db.session.TestingSessionLocal()
+    try:
+        finding = db.query(leakage_models.LeakageFinding).filter_by(
+            id="target-exclusion-finding"
+        ).one()
+        assert finding.status == "resolved"
+        assert finding.evidence["remediation_verification"]["status"] == "verified"
+    finally:
+        db.close()
 
 
 def test_entity_overlap_rebuild_keeps_each_entity_in_one_seeded_partition(client):
@@ -213,6 +258,19 @@ def test_entity_overlap_rebuild_keeps_each_entity_in_one_seeded_partition(client
             "row_indices": {"train": [0], "test": [1]},
         },
     )
+    set_analysis_configuration(
+        dataset["id"],
+        target_column="value",
+        entity_column="patient_id",
+        time_column=None,
+        split_column="partition",
+        split_strategy={
+            "strategy": "existing",
+            "source": "user_confirmed_dataset_column",
+            "test_ratio": 0.34,
+            "random_seed": 319,
+        },
+    )
     result = preview(
         client,
         dataset["id"],
@@ -221,6 +279,7 @@ def test_entity_overlap_rebuild_keeps_each_entity_in_one_seeded_partition(client
             "finding_ids": ["entity-overlap-finding"],
             "entity_column": "patient_id",
             "split_column": "partition",
+            "target_column": "value",
             "test_ratio": 0.34,
             "random_seed": 319,
         }],
@@ -233,15 +292,19 @@ def test_entity_overlap_rebuild_keeps_each_entity_in_one_seeded_partition(client
             "finding_ids": ["entity-overlap-finding"],
             "entity_column": "patient_id",
             "split_column": "partition",
+            "target_column": "value",
             "test_ratio": 0.34,
             "random_seed": 319,
         }],
     )
     assert result["plan"]["preview_digest"] == repeat_preview["plan"]["preview_digest"]
+    assert result["plan"]["analysis_configuration"]["entity_column"] == "patient_id"
+    assert result["plan"]["analysis_configuration"]["target_column"] == "value"
     assert result["plan"]["expected_final_row_count"] == 4
     assert result["plan"]["split_configurations"][0]["algorithm"] == (
-        "sha256_seeded_entity_order_v1"
+        "sha256_seeded_greedy_group_target_balance_v1"
     )
+    assert result["plan"]["split_configurations"][0]["target_column"] == "value"
 
     completed = execute(client, dataset["id"], result)
     assert completed.status_code == 201, completed.text
@@ -251,6 +314,26 @@ def test_entity_overlap_rebuild_keeps_each_entity_in_one_seeded_partition(client
     frame = pd.read_csv(io.BytesIO(output.content), dtype=str)
     assert frame.groupby("patient_id")["partition"].nunique().max() == 1
     assert completed.json()["plan"]["verification"]["checks"]["entity_groups_separated"]
+    manifest = client.get(
+        f"/api/v1/operations/{result['id']}/remediation-artifacts/manifest"
+    ).json()
+    assert manifest["entity_column"] == "patient_id"
+    assert manifest["target_column"] == "value"
+    assert manifest["split_strategy"] == "existing"
+    assert manifest["configuration_snapshot"]["entity_column"] == "patient_id"
+    assert manifest["final_row_count"] == len(frame) == 4
+    assert manifest["final_column_count"] == len(frame.columns)
+    assert manifest["imputation_strategies"] == []
+    assert manifest["verified_finding_ids"] == ["entity-overlap-finding"]
+    assert manifest["unresolved_findings_count"] == 0
+    db = app.db.session.TestingSessionLocal()
+    try:
+        finding = db.query(leakage_models.LeakageFinding).filter_by(
+            id="entity-overlap-finding"
+        ).one()
+        assert finding.status == "resolved"
+    finally:
+        db.close()
 
 
 def test_temporal_finding_requires_and_verifies_confirmed_chronological_cutoff(client):
@@ -535,6 +618,12 @@ def test_entity_overlap_quarantine_creates_separate_verified_quarantine_artifact
     completed = execute(client, dataset["id"], result)
     assert completed.status_code == 201, completed.text
     operation = completed.json()
+    verification = operation["plan"]["verification"]
+    assert operation["status"] == "completed", {
+        key: value
+        for key, value in verification["checks"].items()
+        if value is not True
+    }
     assert operation["plan"]["verification"]["checks"]["entity_groups_separated"]
     assert source_path.read_bytes() == original_bytes
 
@@ -547,6 +636,732 @@ def test_entity_overlap_quarantine_creates_separate_verified_quarantine_artifact
     assert cleaned.status_code == quarantined.status_code == 200
     assert pd.read_csv(io.BytesIO(cleaned.content))["patient_id"].tolist() == ["p2"]
     assert pd.read_csv(io.BytesIO(quarantined.content))["patient_id"].tolist() == ["p1", "p1"]
+
+
+def test_selected_duplicate_and_contamination_verification_share_stable_row_identity(client):
+    # Arbitrary, non-domain-specific columns make this a regression test for
+    # source row identity across duplicate removal, split rewriting, and feature
+    # exclusion in one deterministic plan.
+    csv_text = (
+        "record_key,target_code,unsafe_input,event_clock,fold,entity_key,reading\n"
+        "r-a,positive,positive,2022-01-10,train,g-1,shared\n"
+        "r-b,positive,positive,2022-03-10,test,g-1,shared\n"
+        "r-c,negative,negative,2022-03-01,train,g-2,other-train\n"
+        "r-d,negative,negative,2022-02-15,test,g-3,other-test\n"
+        "r-e,positive,positive,2022-01-15,train,g-4,other-1\n"
+        "r-f,negative,negative,2022-01-25,train,g-5,other-2\n"
+        "r-g,positive,positive,2022-02-10,test,g-6,other-3\n"
+        "r-h,negative,negative,2022-04-01,test,g-7,other-4\n"
+    )
+    dataset = upload_csv(client, "arbitrary identity regression", csv_text)
+    frame = pd.read_csv(
+        ORIGINAL_DIR / dataset["storage_filename"], dtype=str
+    )
+
+    duplicate_hash = hash_row(
+        frame.drop(columns=["record_key", "event_clock", "fold"]).iloc[0]
+    )
+    add_finding(
+        dataset["id"],
+        "arbitrary-duplicate",
+        "exact_duplicate",
+        {
+            "hash": duplicate_hash,
+            "duplicate_count": 2,
+            "row_indices": [0, 1],
+            "hash_excluded_columns": ["record_key", "event_clock", "fold"],
+        },
+    )
+    contamination_hash = hash_row(frame[["unsafe_input", "reading"]].iloc[0])
+    add_finding(
+        dataset["id"],
+        "arbitrary-contamination",
+        "train_test_contamination",
+        {
+            "split_column": "fold",
+            "detection": "configured_key_hash_overlap",
+            "row_hash": contamination_hash,
+            "splits": ["test", "train"],
+            "row_indices": {"train": [0], "test": [1]},
+            "matching_fields": ["unsafe_input", "reading"],
+        },
+    )
+    add_finding(
+        dataset["id"],
+        "arbitrary-target",
+        "target_leakage",
+        {
+            "target_column": "target_code",
+            "feature_column": "unsafe_input",
+            "detection": "exact_target_duplicate",
+            "matching_rows": 8,
+            "total_valid_rows": 8,
+        },
+    )
+    add_finding(
+        dataset["id"],
+        "arbitrary-temporal",
+        "temporal_leakage",
+        {
+            "time_column": "event_clock",
+            "split_column": "fold",
+            "detection": "temporal_overlap",
+            "splits": {
+                "train": {
+                    "min_time": "2022-01-10T00:00:00",
+                    "max_time": "2022-03-01T00:00:00",
+                    "valid_rows": 4,
+                },
+                "test": {
+                    "min_time": "2022-02-10T00:00:00",
+                    "max_time": "2022-04-01T00:00:00",
+                    "valid_rows": 4,
+                },
+            },
+            "invalid_timestamp_rows": 0,
+        },
+    )
+    set_analysis_configuration(
+        dataset["id"],
+        target_column="target_code",
+        entity_column="entity_key",
+        time_column="event_clock",
+        split_column="fold",
+        split_strategy={
+            "strategy": "existing",
+            "source": "user_confirmed_dataset_column",
+            "test_ratio": 0.5,
+            "random_seed": 29,
+        },
+    )
+
+    result = preview(
+        client,
+        dataset["id"],
+        [
+            {
+                "action": "exact_duplicate_keep_first",
+                "finding_ids": ["arbitrary-duplicate"],
+            },
+            {
+                "action": "exclude_contaminated_copies",
+                "finding_ids": ["arbitrary-contamination"],
+                "split_column": "fold",
+                "retained_partition": "train",
+            },
+            {
+                "action": "exclude_target_features",
+                "finding_ids": ["arbitrary-target"],
+                "target_column": "target_code",
+                "feature_columns": ["unsafe_input"],
+            },
+            {
+                "action": "rebuild_chronological_split",
+                "finding_ids": ["arbitrary-temporal"],
+                "time_column": "event_clock",
+                "split_column": "fold",
+                "cutoff": "2022-02-20",
+            },
+        ],
+    )
+    plan = result["plan"]
+    assert plan["expected_final_row_count"] == 7
+    assert plan["expected_output_source_row_identities_sha256"]
+    assert plan["row_identity_scheme"] == "source_sha256_plus_zero_based_position_v1"
+
+    completed = execute(client, dataset["id"], result)
+    assert completed.status_code == 201, completed.text
+    operation = completed.json()
+    verification = operation["plan"]["verification"]
+    assert verification["checks"]["output_source_identity_mapping_matches_plan"]
+    assert verification["checks"]["output_source_identity_content_matches"]
+    assert verification["checks"]["selected_exact_duplicate_groups_resolved"]
+    assert verification["checks"]["selected_contamination_groups_separated"]
+    assert verification["checks"]["chronological_order_verified"]
+    assert verification["finding_verification"][
+        "arbitrary-contamination"
+    ]["verification_basis"] == (
+        "source_row_identity_and_verified_projection_after_feature_exclusion"
+    )
+    assert set(operation["plan"]["verified_finding_ids"]) == {
+        "arbitrary-duplicate",
+        "arbitrary-contamination",
+        "arbitrary-target",
+        "arbitrary-temporal",
+    }
+
+    output = client.get(
+        f"/api/v1/operations/{result['id']}/remediation-artifacts/dataset"
+    )
+    cleaned = pd.read_csv(io.BytesIO(output.content), dtype=str)
+    assert cleaned["record_key"].tolist() == [
+        "r-a",
+        "r-c",
+        "r-d",
+        "r-e",
+        "r-f",
+        "r-g",
+        "r-h",
+    ]
+    assert "unsafe_input" not in cleaned.columns
+    assert len(cleaned["target_code"]) == 7
+    train_max = pd.to_datetime(
+        cleaned.loc[cleaned["fold"] == "train", "event_clock"]
+    ).max()
+    test_min = pd.to_datetime(
+        cleaned.loc[cleaned["fold"] == "test", "event_clock"]
+    ).min()
+    assert train_max < test_min
+
+    report = client.get(
+        f"/api/v1/operations/{result['id']}/remediation-artifacts/report"
+    )
+    report_rows = pd.read_csv(io.BytesIO(report.content), dtype=str)
+    assert set(report_rows["status"]) == {"included"}
+    manifest = client.get(
+        f"/api/v1/operations/{result['id']}/remediation-artifacts/manifest"
+    ).json()
+    assert manifest["final_status"] == "fully_remediated_for_selected_rules", {
+        "verification_status": manifest["verification"]["status"],
+        "detector_results_after": manifest["detector_results_after"],
+        "unresolved_findings_count": manifest["unresolved_findings_count"],
+        "finding_verification": manifest["verification"].get(
+            "finding_verification"
+        ),
+    }
+    assert manifest["verification"]["checks"]["selected_exact_duplicate_groups_resolved"]
+    assert manifest["verification"]["checks"]["selected_contamination_groups_separated"]
+    assert manifest["verified_finding_ids"] == sorted(
+        {
+            "arbitrary-duplicate",
+            "arbitrary-contamination",
+            "arbitrary-target",
+            "arbitrary-temporal",
+        }
+    )
+
+
+def test_preview_rejects_chronological_split_that_moves_retained_contamination_row(client):
+    dataset = upload_csv(
+        client,
+        "incompatible partition constraints",
+        "record,value,event_clock,fold\n"
+        "a,match,2022-01-01,train\n"
+        "b,match,2022-01-02,test\n"
+        "c,train-only,2022-03-01,train\n"
+        "d,test-only,2022-02-15,test\n",
+    )
+    frame = pd.read_csv(
+        ORIGINAL_DIR / dataset["storage_filename"], dtype=str
+    )
+    matching_hash = hash_row(frame[["value"]].iloc[0])
+    add_finding(
+        dataset["id"],
+        "constraint-contamination",
+        "train_test_contamination",
+        {
+            "split_column": "fold",
+            "row_hash": matching_hash,
+            "row_indices": {"train": [0], "test": [1]},
+            "matching_fields": ["value"],
+        },
+    )
+    add_finding(
+        dataset["id"],
+        "constraint-temporal",
+        "temporal_leakage",
+        {
+            "time_column": "event_clock",
+            "split_column": "fold",
+            "splits": {
+                "train": {
+                    "min_time": "2022-01-01T00:00:00",
+                    "max_time": "2022-03-01T00:00:00",
+                    "valid_rows": 2,
+                },
+                "test": {
+                    "min_time": "2022-01-02T00:00:00",
+                    "max_time": "2022-02-15T00:00:00",
+                    "valid_rows": 2,
+                },
+            },
+            "invalid_timestamp_rows": 0,
+        },
+    )
+
+    response = client.post(
+        f"/api/v1/datasets/{dataset['id']}/remediation-plans/preview",
+        json={
+            "actions": [
+                {
+                    "action": "exclude_contaminated_copies",
+                    "finding_ids": ["constraint-contamination"],
+                    "split_column": "fold",
+                    "retained_partition": "test",
+                },
+                {
+                    "action": "rebuild_chronological_split",
+                    "finding_ids": ["constraint-temporal"],
+                    "time_column": "event_clock",
+                    "split_column": "fold",
+                    "cutoff": "2022-02-01",
+                },
+            ]
+        },
+    )
+    assert response.status_code == 409
+    assert "conflicts with the explicitly retained partition" in str(
+        response.json()["detail"]
+    )
+
+
+def test_duplicate_detector_cannot_resolve_a_selected_group_without_its_canonical_row():
+    from app.services.remediation_service import (
+        _sha256_json,
+        _post_remediation_detector_results,
+        _reconcile_selected_finding_detector_status,
+        _source_row_identity,
+        _verified_finding_ids,
+        _verify_plan,
+    )
+
+    source = pd.DataFrame(
+        {
+            "arbitrary_key": ["x1", "x2", "y1"],
+            "measure": ["same", "same", "other"],
+            "partition_name": ["left", "right", "right"],
+        }
+    )
+    plan = {
+        "original_file_sha256": "a" * 64,
+        "expected_output_source_row_positions_sha256": _sha256_json([2]),
+        "expected_output_source_row_identities_sha256": _sha256_json(
+            [_source_row_identity("a" * 64, 2)]
+        ),
+        "applied_finding_ids": ["duplicate-without-canonical"],
+        "action_results": [
+            {
+                "action": "exact_duplicate_keep_first",
+                "applied_finding_ids": ["duplicate-without-canonical"],
+            }
+        ],
+        "finding_snapshot": [
+            {
+                "id": "duplicate-without-canonical",
+                "finding_type": "exact_duplicate",
+                "evidence": {
+                    "row_indices": [0, 1],
+                    "hash_excluded_columns": ["arbitrary_key", "partition_name"],
+                },
+            }
+        ],
+        "duplicate_group_constraints": [
+            {
+                "finding_id": "duplicate-without-canonical",
+                "source_row_positions": [0, 1],
+                "source_row_identities": [
+                    _source_row_identity("a" * 64, 0),
+                    _source_row_identity("a" * 64, 1),
+                ],
+                "keep_first_source_row_position": 0,
+                "keep_first_source_row_identity": _source_row_identity(
+                    "a" * 64, 0
+                ),
+            }
+        ],
+        "excluded_feature_columns": [],
+        "expected_final_row_count": 1,
+        "expected_output_change": True,
+        "split_updates": {},
+    }
+    output = source.iloc[[2]].reset_index(drop=True)
+    verification = _verify_plan(
+        output_frame=output,
+        output_source_row_positions=[2],
+        quarantine_frame=None,
+        quarantine_source_row_positions=[],
+        source_frame=source,
+        plan=plan,
+    )
+    detector = _post_remediation_detector_results(
+        output,
+        {
+            "split_column": None,
+            "split_strategy": "none",
+        },
+    )
+    assert detector["exact_duplicate"]["status"] == "passed"
+    assert verification["checks"]["selected_exact_duplicate_groups_resolved"] is False
+    _reconcile_selected_finding_detector_status(detector, plan, set())
+    assert detector["exact_duplicate"]["status"] == "review_required"
+    assert detector["exact_duplicate"]["selected_finding_verification_failed"] is True
+    assert _verified_finding_ids(
+        plan,
+        {
+            **verification["checks"],
+            "output_source_identity_mapping_matches_plan": True,
+            "output_source_identity_content_matches": True,
+            "output_bytes_round_trip_matches": True,
+            "source_sha256_unchanged": True,
+            "final_sha256_matches_output": True,
+            "output_schema_matches_expected": True,
+            "output_row_count_matches_expected": True,
+        },
+        verification["finding_checks"],
+    ) == []
+
+
+def test_failed_identity_verification_agrees_in_report_manifest_and_detector_state(
+    client, monkeypatch
+):
+    from app.services import remediation_service
+
+    dataset = upload_csv(
+        client,
+        "failed identity report regression",
+        "record,value\nk-1,same\nk-2,same\nk-3,unique\n",
+    )
+    frame = pd.read_csv(
+        ORIGINAL_DIR / dataset["storage_filename"], dtype=str
+    )
+    duplicate_hash = hash_row(frame.drop(columns=["record"]).iloc[0])
+    add_finding(
+        dataset["id"],
+        "failed-identity-duplicate",
+        "exact_duplicate",
+        {
+            "hash": duplicate_hash,
+            "duplicate_count": 2,
+            "row_indices": [0, 1],
+            "hash_excluded_columns": ["record"],
+        },
+    )
+    result = preview(
+        client,
+        dataset["id"],
+        [
+            {
+                "action": "exact_duplicate_keep_first",
+                "finding_ids": ["failed-identity-duplicate"],
+            }
+        ],
+    )
+
+    original_transform = remediation_service._execute_transform
+
+    def wrong_identity_mapping(source, plan):
+        output, quarantine, _, quarantine_positions = original_transform(
+            source, plan
+        )
+        # The file bytes still contain the actual kept-first output, but this
+        # deliberately incorrect mapping says the later duplicate survived.
+        return output, quarantine, [1, 2], quarantine_positions
+
+    monkeypatch.setattr(
+        remediation_service, "_execute_transform", wrong_identity_mapping
+    )
+    completed = execute(client, dataset["id"], result)
+    assert completed.status_code == 201, completed.text
+    operation = completed.json()
+    verification = operation["plan"]["verification"]
+    assert operation["status"] == "failed"
+    assert verification["checks"]["selected_exact_duplicate_groups_resolved"] is False
+    assert (
+        verification["detector_results_after"]["exact_duplicate"]["status"]
+        == "review_required"
+    )
+    assert operation["plan"]["verified_finding_ids"] == []
+    assert operation["plan"]["final_status"] == "failed"
+
+    report_response = client.get(
+        f"/api/v1/operations/{result['id']}/remediation-artifacts/report"
+    )
+    assert report_response.status_code == 200
+    report = pd.read_csv(io.BytesIO(report_response.content), dtype=str)
+    assert report.iloc[0]["status"] == "failed_verification"
+
+    manifest_response = client.get(
+        f"/api/v1/operations/{result['id']}/remediation-artifacts/manifest"
+    )
+    assert manifest_response.status_code == 200
+    manifest = manifest_response.json()
+    assert manifest["final_status"] == "failed"
+    assert manifest["verification"]["detector_results_after"][
+        "exact_duplicate"
+    ]["status"] == "review_required"
+    assert manifest["verified_finding_ids"] == []
+    assert manifest["unresolved_findings_count"] == 1
+
+    db = app.db.session.TestingSessionLocal()
+    try:
+        finding = db.query(leakage_models.LeakageFinding).filter_by(
+            id="failed-identity-duplicate"
+        ).one()
+        assert finding.status == "open"
+    finally:
+        db.close()
+
+
+def test_contamination_cannot_pass_when_all_selected_copies_disappear():
+    from app.services.remediation_service import (
+        _post_remediation_detector_results,
+        _reconcile_selected_finding_detector_status,
+        _sha256_json,
+        _source_row_identity,
+        _verify_plan,
+    )
+
+    source = pd.DataFrame(
+        {
+            "record_code": ["c-1", "c-2", "c-3"],
+            "match_key": ["same", "same", "unique"],
+            "split_name": ["left", "right", "left"],
+        }
+    )
+    source_hash = "c" * 64
+    row_hash = hash_row(source[["match_key"]].iloc[0])
+    expected_positions = [2]
+    plan = {
+        "original_file_sha256": source_hash,
+        "expected_output_source_row_positions_sha256": _sha256_json(
+            expected_positions
+        ),
+        "expected_output_source_row_identities_sha256": _sha256_json(
+            [_source_row_identity(source_hash, 2)]
+        ),
+        "applied_finding_ids": ["contamination-without-retained-copy"],
+        "finding_snapshot": [
+            {
+                "id": "contamination-without-retained-copy",
+                "finding_type": "train_test_contamination",
+                "evidence": {},
+            }
+        ],
+        "action_results": [
+            {
+                "action": "exclude_contaminated_copies",
+                "applied_finding_ids": [
+                    "contamination-without-retained-copy"
+                ],
+            }
+        ],
+        "contamination_constraints": [
+            {
+                "finding_id": "contamination-without-retained-copy",
+                "action": "exclude_contaminated_copies",
+                "split_column": "split_name",
+                "row_hash": row_hash,
+                "matching_fields": ["match_key"],
+                "retained_partition": "right",
+                "retained_source_row_positions": [1],
+                "retained_source_row_identities": [
+                    _source_row_identity(source_hash, 1)
+                ],
+                "excluded_source_row_positions": [0],
+                "excluded_source_row_identities": [
+                    _source_row_identity(source_hash, 0)
+                ],
+            }
+        ],
+        "excluded_feature_columns": [],
+        "expected_final_row_count": 1,
+        "expected_output_change": True,
+        "split_updates": {},
+        "quarantine_source_row_positions": [],
+    }
+    output = source.iloc[[2]].reset_index(drop=True)
+    verification = _verify_plan(
+        output_frame=output,
+        output_source_row_positions=expected_positions,
+        quarantine_frame=None,
+        quarantine_source_row_positions=[],
+        source_frame=source,
+        plan=plan,
+    )
+    detector = _post_remediation_detector_results(
+        output,
+        {"split_column": "split_name", "split_strategy": "existing"},
+    )
+    assert detector["train_test_contamination"]["status"] == "passed"
+    assert (
+        verification["checks"]["selected_contamination_groups_separated"]
+        is False
+    )
+    assert (
+        verification["finding_checks"][
+            "contamination-without-retained-copy"
+        ]["selected_contamination_group_policy_verified"]
+        is False
+    )
+    _reconcile_selected_finding_detector_status(detector, plan, set())
+    assert detector["train_test_contamination"]["status"] == "review_required"
+
+
+def test_contamination_verification_survives_excluding_its_evidenced_feature(
+    client,
+):
+    """Feature exclusion must not invalidate source-identity remediation proof."""
+    dataset = upload_csv(
+        client,
+        "excluded contamination evidence",
+        "record_token,target_label,leak_marker,partition\n"
+        "source-train,positive,positive,train\n"
+        "source-test,positive,positive,test\n",
+    )
+    source_path = ORIGINAL_DIR / dataset["storage_filename"]
+    source_bytes = source_path.read_bytes()
+    frame = pd.read_csv(
+        source_path, dtype=str
+    )
+    duplicate_hash = hash_row(
+        frame.drop(columns=["record_token", "partition"]).iloc[0]
+    )
+    contamination_hash = hash_row(frame[["leak_marker"]].iloc[0])
+    add_finding(
+        dataset["id"],
+        "excluded-feature-duplicate",
+        "exact_duplicate",
+        {
+            "hash": duplicate_hash,
+            "duplicate_count": 2,
+            "row_indices": [0, 1],
+            "hash_excluded_columns": ["record_token", "partition"],
+        },
+    )
+    add_finding(
+        dataset["id"],
+        "excluded-feature-contamination",
+        "train_test_contamination",
+        {
+            "split_column": "partition",
+            "detection": "configured_key_hash_overlap",
+            "row_hash": contamination_hash,
+            "splits": ["test", "train"],
+            "row_indices": {"train": [0], "test": [1]},
+            "matching_fields": ["leak_marker"],
+        },
+    )
+    add_finding(
+        dataset["id"],
+        "excluded-feature-target",
+        "target_leakage",
+        {
+            "target_column": "target_label",
+            "feature_column": "leak_marker",
+            "detection": "exact_target_duplicate",
+            "matching_rows": 2,
+            "total_valid_rows": 2,
+        },
+    )
+    set_analysis_configuration(
+        dataset["id"],
+        target_column="target_label",
+        entity_column=None,
+        time_column=None,
+        split_column="partition",
+        split_strategy={"strategy": "existing"},
+    )
+
+    result = preview(
+        client,
+        dataset["id"],
+        [
+            {
+                "action": "exact_duplicate_keep_first",
+                "finding_ids": ["excluded-feature-duplicate"],
+            },
+            {
+                "action": "exclude_contaminated_copies",
+                "finding_ids": ["excluded-feature-contamination"],
+                "split_column": "partition",
+                "retained_partition": "train",
+            },
+            {
+                "action": "exclude_target_features",
+                "finding_ids": ["excluded-feature-target"],
+                "target_column": "target_label",
+                "feature_columns": ["leak_marker"],
+            },
+        ],
+    )
+    completed = execute(client, dataset["id"], result)
+    assert completed.status_code == 201, completed.text
+    operation = completed.json()
+    verification = operation["plan"]["verification"]
+
+    assert (
+        verification["detector_results_after"]["train_test_contamination"][
+            "remaining_condition_count"
+        ]
+        == 0
+    )
+    assert (
+        verification["detector_results_after"]["train_test_contamination"][
+            "status"
+        ]
+        == "passed"
+    )
+    assert (
+        verification["checks"]["selected_contamination_groups_separated"]
+        is True
+    )
+    assert verification["status"] == "verified"
+    assert operation["status"] == "completed"
+    assert (
+        verification["finding_verification"][
+            "excluded-feature-contamination"
+        ]["status"]
+        == "verified"
+    )
+    assert (
+        verification["finding_verification"][
+            "excluded-feature-contamination"
+        ]["verification_basis"]
+        == "source_row_identity_and_verified_projection_after_feature_exclusion"
+    )
+    assert operation["plan"]["verified_finding_ids"] == [
+        "excluded-feature-contamination",
+        "excluded-feature-duplicate",
+        "excluded-feature-target",
+    ]
+
+    output = client.get(
+        f"/api/v1/operations/{result['id']}/remediation-artifacts/dataset"
+    )
+    assert output.status_code == 200
+    cleaned = pd.read_csv(io.BytesIO(output.content), dtype=str)
+    assert source_path.read_bytes() == source_bytes
+    assert cleaned["record_token"].tolist() == ["source-train"]
+    assert cleaned["partition"].tolist() == ["train"]
+    assert cleaned["target_label"].tolist() == ["positive"]
+    assert "leak_marker" not in cleaned.columns
+
+    manifest = client.get(
+        f"/api/v1/operations/{result['id']}/remediation-artifacts/manifest"
+    ).json()
+    assert manifest["final_status"] == "fully_remediated_for_selected_rules"
+    assert manifest["verification"]["checks"][
+        "selected_contamination_groups_separated"
+    ] is True
+    assert manifest["verification"]["finding_verification"][
+        "excluded-feature-contamination"
+    ]["verification_basis"] == (
+        "source_row_identity_and_verified_projection_after_feature_exclusion"
+    )
+    report = client.get(
+        f"/api/v1/operations/{result['id']}/remediation-artifacts/report"
+    )
+    report_rows = pd.read_csv(io.BytesIO(report.content), dtype=str)
+    statuses = dict(zip(report_rows["finding_id"], report_rows["status"]))
+    assert statuses["excluded-feature-contamination"] == "included"
+    db = app.db.session.TestingSessionLocal()
+    try:
+        finding = db.query(leakage_models.LeakageFinding).filter_by(
+            id="excluded-feature-contamination"
+        ).one()
+        assert finding.status == "resolved"
+    finally:
+        db.close()
 
 
 def test_remediation_endpoints_enforce_dataset_ownership(client):

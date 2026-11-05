@@ -25,6 +25,18 @@ class DistributionCreate(BaseModel):
     comparison_dataset_id: str
 
 
+class PartitionDistributionCreate(BaseModel):
+    reference_partition: str = Field(min_length=1, max_length=200)
+    comparison_partition: str = Field(min_length=1, max_length=200)
+
+
+class PartitionDistributionRead(BaseModel):
+    id: str
+    dataset_id: str
+    created_at: str
+    result: Dict[str, Any]
+
+
 class ImpactCreate(BaseModel):
     dataset_id: str
 

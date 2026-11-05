@@ -1,3 +1,5 @@
+import hashlib
+import json
 import os
 import pandas as pd
 from sqlalchemy.orm import Session
@@ -181,7 +183,7 @@ def detect_exact_duplicates(
 def detect_entity_overlap(
     dataset_id: str,
     db: Session,
-    entity_column: str,
+    entity_column: str | list[str],
     split_column: str,
     analysis_frame: Optional[pd.DataFrame] = None,
 ) -> list:
@@ -195,6 +197,27 @@ def detect_entity_overlap(
         raise HTTPException(status_code=404, detail="Dataset not found")
 
     df = _load_analysis_frame(dataset, analysis_frame)
+
+    if isinstance(entity_column, list):
+        normalized_columns = list(dict.fromkeys(
+            value.strip()
+            for value in entity_column
+            if isinstance(value, str) and value.strip()
+        ))
+        if len(normalized_columns) != len(entity_column) or not normalized_columns:
+            raise HTTPException(
+                status_code=400,
+                detail="Entity columns must be a non-empty list of unique column names",
+            )
+        if len(normalized_columns) > 1:
+            return detect_composite_entity_overlap(
+                dataset_id,
+                db,
+                normalized_columns,
+                split_column,
+                analysis_frame=df,
+            )
+        entity_column = normalized_columns[0]
 
     # Check that entity_column and split_column exist
     if entity_column not in df.columns:
@@ -225,10 +248,7 @@ def detect_entity_overlap(
 
     # Check if we have any valid entities remaining
     if len(df_filtered) == 0:
-        raise HTTPException(
-            status_code=400,
-            detail=f"No valid entities found in column '{entity_column}'"
-        )
+        return []
 
     # List to hold findings (ORM objects) that we will commit and then convert to dicts
     findings_to_commit = []
@@ -327,6 +347,134 @@ def detect_entity_overlap(
     return findings_to_return
 
 
+def detect_composite_entity_overlap(
+    dataset_id: str,
+    db: Session,
+    entity_columns: list[str],
+    split_column: str,
+    analysis_frame: Optional[pd.DataFrame] = None,
+) -> list:
+    """Detect overlap by a user-confirmed composite grouping key.
+
+    Rows with any missing/blank key component or missing partition are excluded
+    from grouping and their counts are retained in each finding's evidence.
+    They are not treated as a successful separation check.
+    """
+    dataset = db.query(models.Dataset).filter(models.Dataset.id == dataset_id).first()
+    if not dataset:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    df = _load_analysis_frame(dataset, analysis_frame)
+    if not entity_columns or len(set(entity_columns)) != len(entity_columns):
+        raise HTTPException(
+            status_code=400,
+            detail="Composite entity key must contain unique configured columns",
+        )
+    missing_columns = [column for column in entity_columns if column not in df.columns]
+    if missing_columns:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Entity column(s) not found in dataset columns: {', '.join(missing_columns)}",
+        )
+    if split_column not in df.columns:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Split column '{split_column}' not found in dataset columns",
+        )
+
+    def normalize(value: object) -> str | None:
+        if pd.isna(value):
+            return None
+        text = str(value).strip()
+        return text or None
+
+    groups: dict[tuple[str, ...], dict[str, list[int]]] = {}
+    missing_key_rows = 0
+    missing_split_rows = 0
+    for position in range(len(df)):
+        components = tuple(normalize(df[column].iloc[position]) for column in entity_columns)
+        partition = normalize(df[split_column].iloc[position])
+        if any(component is None for component in components):
+            missing_key_rows += 1
+            continue
+        if partition is None:
+            missing_split_rows += 1
+            continue
+        groups.setdefault(components, {}).setdefault(partition.casefold(), []).append(position)
+
+    findings: list[leakage_models.LeakageFinding] = []
+    returned: list[dict] = []
+    for values, row_map in groups.items():
+        if len(row_map) < 2:
+            continue
+        evidence = {
+            "entity_columns": entity_columns,
+            "entity_values": dict(zip(entity_columns, values)),
+            "split_column": split_column,
+            "splits": sorted(row_map),
+            "row_indices": {
+                split: sorted(positions) for split, positions in sorted(row_map.items())
+            },
+            "missing_entity_key_row_count": missing_key_rows,
+            "missing_split_row_count": missing_split_rows,
+            "classification": "composite_entity_group_crosses_partitions",
+            "evidence_strength": "direct_partition_membership",
+        }
+        existing = (
+            db.query(leakage_models.LeakageFinding)
+            .filter(
+                leakage_models.LeakageFinding.dataset_id == dataset_id,
+                leakage_models.LeakageFinding.finding_type == "entity_overlap",
+                leakage_models.LeakageFinding.evidence == evidence,
+            )
+            .first()
+        )
+        if existing:
+            existing.created_at = pd.Timestamp.utcnow()
+            db.add(existing)
+            finding = existing
+        else:
+            finding = leakage_models.LeakageFinding(
+                dataset_id=dataset_id,
+                finding_type="entity_overlap",
+                severity="high",
+                status="open",
+                description=(
+                    "The configured composite entity key from columns "
+                    f"{', '.join(entity_columns)} occurs in multiple partitions: "
+                    f"{', '.join(sorted(row_map))}."
+                ),
+                evidence=evidence,
+            )
+            db.add(finding)
+            findings.append(finding)
+        if existing:
+            returned.append({
+                "id": str(finding.id),
+                "dataset_id": str(finding.dataset_id),
+                "finding_type": finding.finding_type,
+                "severity": finding.severity,
+                "status": finding.status,
+                "description": finding.description,
+                "evidence": finding.evidence,
+                "created_at": finding.created_at.isoformat() if finding.created_at else None,
+            })
+
+    db.commit()
+    for finding in findings:
+        db.refresh(finding)
+        returned.append({
+            "id": str(finding.id),
+            "dataset_id": str(finding.dataset_id),
+            "finding_type": finding.finding_type,
+            "severity": finding.severity,
+            "status": finding.status,
+            "description": finding.description,
+            "evidence": finding.evidence,
+            "created_at": finding.created_at.isoformat() if finding.created_at else None,
+        })
+    return returned
+
+
 def detect_target_leakage(
     dataset_id: str,
     db: Session,
@@ -362,10 +510,7 @@ def detect_target_leakage(
 
     # Check if we have any valid targets remaining
     if len(df_filtered) == 0:
-        raise HTTPException(
-            status_code=400,
-            detail=f"No valid targets found in column '{target_column}'"
-        )
+        return []
 
     # List to hold findings (ORM objects) that we will commit and then convert to dicts
     findings_to_commit = []
@@ -386,7 +531,7 @@ def detect_target_leakage(
             & feature_value_strings.str.strip().ne("").fillna(False)
         )
         feature_series = raw_feature_series[valid_feature_mask]
-        target_series = target_series_filtered[valid_feature_mask]
+        feature_target_series = target_series_filtered[valid_feature_mask]
 
         # Check if feature column has sufficient variation
         # Skip columns where all values are the same (likely ID columns)
@@ -394,7 +539,7 @@ def detect_target_leakage(
             continue
 
         # Check if target column has sufficient variation
-        if target_series.nunique() <= 1:
+        if feature_target_series.nunique() <= 1:
             continue
 
         # Build mapping from feature values to target values
@@ -404,7 +549,7 @@ def detect_target_leakage(
         conflicting_mappings = {}
 
         # Iterate through rows with valid feature/target pairs to build mapping
-        for feature_val, target_val in zip(feature_series, target_series):
+        for feature_val, target_val in zip(feature_series, feature_target_series):
             if feature_val in mapping:
                 # Check for consistency
                 if mapping[feature_val] != target_val:
@@ -419,7 +564,7 @@ def detect_target_leakage(
         # Check for exact target duplication: feature column values identical to target column values
         # Compare the actual values directly, not the mapping
         feature_values = feature_series.tolist()
-        target_values = target_series.tolist()
+        target_values = feature_target_series.tolist()
 
         # Check if feature column exactly matches target column
         if feature_values == target_values and len(feature_values) > 0:
@@ -428,6 +573,9 @@ def detect_target_leakage(
                 "target_column": target_column,
                 "feature_column": column,
                 "detection": "exact_target_duplicate",
+                "classification": "confirmed_exact_copy",
+                "evidence_strength": "confirmed",
+                "reason": "Every valid feature value exactly matches its target value.",
                 "matching_rows": len(feature_series),
                 "total_valid_rows": len(feature_series)
             }
@@ -489,16 +637,82 @@ def detect_target_leakage(
             # - Target column itself is never flagged
             if (len(unique_feature_values) >= 2 and
                 len(unique_target_values) >= 2):
+                feature_cardinality_ratio = (
+                    len(unique_feature_values) / max(1, len(feature_series))
+                )
+                # Very high-cardinality features often behave like record or
+                # entity identifiers. Their one-way association is not enough
+                # evidence to label them target leakage. Exact copies are
+                # checked above; low-cardinality reversible encodings remain
+                # eligible for the deterministic-mapping check.
+                if (
+                    len(unique_feature_values) >= 5
+                    and len(unique_feature_values) > len(unique_target_values)
+                    and feature_cardinality_ratio >= 0.8
+                ):
+                    continue
 
-                # Build evidence for deterministic mapping
+                # A mapping is a confirmed reversible encoding only when it
+                # is bijective. A one-way deterministic relationship remains
+                # a suspected signal because it may be legitimate or may not
+                # be available at prediction time.
+                reverse_mapping = {}
+                bijective = True
+                for feature_value, target_value in mapping.items():
+                    if (
+                        target_value in reverse_mapping
+                        and reverse_mapping[target_value] != feature_value
+                    ):
+                        bijective = False
+                        break
+                    reverse_mapping[target_value] = feature_value
+                reversible = (
+                    bijective
+                    and len(unique_feature_values) == len(unique_target_values)
+                )
+                string_mapping = {
+                    str(feature_value): str(target_value)
+                    for feature_value, target_value in mapping.items()
+                }
+                mapping_digest = hashlib.sha256(
+                    json.dumps(
+                        sorted(string_mapping.items()),
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()
+
                 evidence = {
                     "target_column": target_column,
                     "feature_column": column,
                     "detection": "deterministic_feature_target_mapping",
+                    "classification": (
+                        "confirmed_reversible_encoding"
+                        if reversible
+                        else "suspected_deterministic_association"
+                    ),
+                    "evidence_strength": "confirmed" if reversible else "suspected",
+                    "reason": (
+                        "Each feature value maps consistently and bijectively to one target value."
+                        if reversible
+                        else (
+                            "Feature values map consistently to target values, but the mapping "
+                            "is not one-to-one. Review data provenance and prediction-time "
+                            "availability before treating it as leakage."
+                        )
+                    ),
                     "unique_feature_values": len(unique_feature_values),
+                    "feature_cardinality_ratio": feature_cardinality_ratio,
                     "unique_target_values": len(unique_target_values),
-                    "mapping": mapping
+                    "rows_evaluated": int(len(feature_series)),
+                    "mapping_digest": mapping_digest,
                 }
+                if len(string_mapping) <= 100:
+                    evidence["mapping"] = string_mapping
+                else:
+                    evidence["mapping_sample"] = dict(
+                        sorted(string_mapping.items())[:20]
+                    )
 
                 # Check if a finding with this evidence already exists
                 existing = db.query(leakage_models.LeakageFinding).filter(
@@ -525,11 +739,20 @@ def detect_target_leakage(
                     findings_to_return.append(finding_dict)
                 else:
                     # Create new finding
-                    description = f"Feature column '{column}' deterministically maps each feature value to a single target value."
+                    description = (
+                        f"Feature column '{column}' is a reversible encoding of target "
+                        f"'{target_column}'."
+                        if reversible
+                        else (
+                            f"Feature column '{column}' has a deterministic association with "
+                            f"target '{target_column}'; review its provenance and availability "
+                            "at prediction time."
+                        )
+                    )
                     finding = leakage_models.LeakageFinding(
                         dataset_id=dataset_id,
                         finding_type="target_leakage",
-                        severity="high",
+                        severity="high" if reversible else "medium",
                         status="open",
                         description=description,
                         evidence=evidence
@@ -591,12 +814,19 @@ def detect_temporal_leakage(
 
     # Normalize time values: parse as datetime, handle invalid values
     try:
-        time_series = pd.to_datetime(df[time_column], errors='coerce')
+        # Normalize offsets to UTC before comparison. Converting back to
+        # timezone-naive UTC keeps the historical evidence representation
+        # stable while making mixed timezone inputs comparable.
+        time_series = pd.to_datetime(
+            df[time_column], errors="coerce", utc=True
+        ).dt.tz_convert(None)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to parse time column: {str(e)}")
 
     # Normalize split values: strip whitespace, lowercase, treat null/empty as missing
-    split_series = df[split_column].astype(str).str.strip().str.lower()
+    split_series = df[split_column].map(
+        lambda value: "" if pd.isna(value) else str(value).strip().casefold()
+    )
 
     # Mask for valid (non-NaT) time values and non-empty split values
     valid_time_mask = ~time_series.isna()
@@ -610,10 +840,7 @@ def detect_temporal_leakage(
 
     # Check if we have any valid timestamps remaining
     if len(df_filtered) == 0:
-        raise HTTPException(
-            status_code=400,
-            detail=f"No valid timestamps found in column '{time_column}'"
-        )
+        return []
 
     # List to hold findings (ORM objects) that we will commit and then convert to dicts
     findings_to_commit = []
@@ -689,7 +916,9 @@ def detect_temporal_leakage(
                     "split_column": split_column,
                     "detection": "temporal_overlap",
                     "splits": split_ranges,
-                    "invalid_timestamp_rows": len(df) - len(df_filtered)  # Original rows minus filtered rows
+                "invalid_timestamp_rows": int(time_series.isna().sum()),
+                "missing_split_rows": int((split_series == "").sum()),
+                "timestamp_timezone_normalization": "UTC",
                 }
 
                 # Add boundary overlap flag if applicable
@@ -764,6 +993,7 @@ def detect_train_test_contamination(
     db: Session,
     split_column: str,
     analysis_frame: Optional[pd.DataFrame] = None,
+    matching_columns: Optional[list[str]] = None,
 ) -> list:
     """
     Detect train/test contamination in a dataset's stored file.
@@ -797,21 +1027,66 @@ def detect_train_test_contamination(
 
     # Check if we have any valid split values remaining
     if len(df_filtered) == 0:
-        raise HTTPException(
-            status_code=400,
-            detail=f"No valid split values found in column '{split_column}'"
+        return []
+
+    configured_matching_columns = matching_columns or []
+    missing_matching_key_rows = 0
+    if configured_matching_columns:
+        if (
+            len(configured_matching_columns) != len(set(configured_matching_columns))
+            or any(
+                not isinstance(column, str)
+                or column not in df_filtered.columns
+                or column == split_column
+                for column in configured_matching_columns
+            )
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="Contamination matching columns must be unique existing non-split columns",
+            )
+        missing_key_mask = (
+            df_filtered[configured_matching_columns]
+            .apply(
+                lambda series: (
+                    series.isna()
+                    | series.astype("string").str.strip().eq("").fillna(False)
+                )
+            )
+            .any(axis=1)
         )
-
-    # Calculate column_count (original columns excluding split column)
-    column_count = len(df_filtered.columns) - 1  # All columns except split column
-
-    # We'll compute row hashes excluding the split column and any ID column
-    # Create a copy of the dataframe without the split column for hashing
-    df_for_hashing = df_filtered.drop(columns=[split_column])
-    # Also exclude ID column if present (case-insensitive)
-    id_columns = [col for col in df_for_hashing.columns if col.lower() == 'id']
-    if id_columns:
-        df_for_hashing = df_for_hashing.drop(columns=id_columns)
+        missing_matching_key_rows = int(missing_key_mask.sum())
+        df_filtered = df_filtered.loc[~missing_key_mask].copy()
+        split_series_filtered = split_series_filtered.loc[df_filtered.index]
+        df_for_hashing = df_filtered[configured_matching_columns]
+        column_count = len(configured_matching_columns)
+        detection_name = "configured_key_hash_overlap"
+        classification = "configured_key_cross_partition_match"
+        evidence_strength = "user_configured_key_match"
+        classification_reason = (
+            "The user-confirmed comparison key has the same canonical value "
+            "in distinct partition labels."
+        )
+    else:
+        # Backwards-compatible full-content comparison excludes only the split
+        # and the legacy conventional row identifier. Users can select any
+        # other matching key explicitly through analysis configuration.
+        column_count = len(df_filtered.columns) - 1
+        df_for_hashing = df_filtered.drop(columns=[split_column])
+        id_columns = [col for col in df_for_hashing.columns if col.lower() == 'id']
+        if id_columns:
+            df_for_hashing = df_for_hashing.drop(columns=id_columns)
+        detection_name = "exact_row_hash_overlap"
+        classification = "exact_cross_partition_content_match"
+        evidence_strength = "confirmed_exact"
+        classification_reason = (
+            "Identical canonical row content matched across distinct "
+            "partition labels using the recorded matching fields."
+        )
+    if df_for_hashing.shape[1] == 0:
+        # There is no content left to compare after excluding the partition
+        # and the legacy conventional row identifier.
+        return []
 
     # Compute hash for each row (excluding split column and ID column)
     df_filtered['_row_hash'] = df_for_hashing.apply(hash_row, axis=1)
@@ -849,11 +1124,29 @@ def detect_train_test_contamination(
             # Build evidence for train/test contamination
             evidence = {
                 "split_column": split_column,
-                "detection": "exact_row_hash_overlap",
+                "detection": detection_name,
                 "row_hash": row_hash,
                 "splits": [str(s) for s in sorted(unique_splits)],  # Ensure strings
                 "row_indices": {str(k): [int(x) for x in v] for k, v in row_indices_data.items()},
-                "column_count": int(column_count)  # All columns except split column
+                "source_row_positions_by_partition": {
+                    str(k): [int(x) for x in v]
+                    for k, v in row_indices_data.items()
+                },
+                "record_references": [
+                    {
+                        "source_row_position": int(position),
+                        "partition": str(partition),
+                    }
+                    for partition, positions in row_indices_data.items()
+                    for position in positions
+                ],
+                "matching_fields": list(df_for_hashing.columns),
+                "matching_field_count": int(len(df_for_hashing.columns)),
+                "classification": classification,
+                "classification_reason": classification_reason,
+                "evidence_strength": evidence_strength,
+                "missing_matching_key_row_count": missing_matching_key_rows,
+                "column_count": int(column_count)  # Backward-compatible field.
             }
 
             # Check if a finding with this evidence already exists

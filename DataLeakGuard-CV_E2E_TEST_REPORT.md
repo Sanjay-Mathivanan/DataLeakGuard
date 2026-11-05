@@ -943,3 +943,246 @@ Manual browser checklist (NOT VERIFIED):
 5. Use remediation history to reopen a plan and the Audit History link to
    inspect persisted events. Verify the uploaded source hash/bytes are
    unchanged.
+
+## Generic leakage/remediation maintenance verification — 2026-11-04
+
+This verification supersedes test counts from earlier dated implementation
+checkpoints but does not replace historical browser evidence or claim a fresh
+browser run.
+
+### Automated checks
+
+| Command | Environment | Actual result | Status |
+|---|---|---|---|
+| `rtk proxy python -m pytest tests -q -p no:cacheprovider` | Disposable copy `C:\Users\sanja\AppData\Local\Temp\DLCV-generic-final-review-y0u7qsdq\backend`; copied app/tests/migrations/requirements only; per-test DB/storage fixtures | **301 passed, 1 skipped, 244 warnings**, exit 0, 80.85s | PASS |
+| `rtk proxy python -m compileall -q app tests` | Same isolated backend copy | Exit 0 | PASS |
+| `rtk proxy npm test` | Project frontend, including new imputation UI test and existing API/component tests | **95 passed, 0 failed, 0 skipped**, exit 0 | PASS |
+| `rtk proxy npm run lint` | Project frontend; script runs `tsc --noEmit` | Exit 0, no diagnostics | PASS |
+| `rtk proxy npm run build -- --outDir C:\Users\sanja\AppData\Local\Temp\DLCV-generic-final-build-20261104-r2` | Project frontend, output outside repository | Exit 0; 2,282 modules transformed; JS bundle 949.90 kB | PASS |
+
+Backend warnings are existing Starlette/httpx, SQLAlchemy and Pydantic
+deprecations, optional PyArrow warning, and date-inference warnings in the
+invalid-timestamp regression. Build advisories: local Node v20.13.1 is below
+Vite's supported minimum; Vite warns about `__dirname` under native config
+loading; the output directory is outside the project; the JS chunk exceeds
+500 kB. An initial in-sandbox build was blocked by Node `EPERM` resolving
+`C:\Users\sanja`; the same build passed on the approved filesystem-access
+retry to the unique temporary path above.
+
+### Generalization and regression coverage
+
+The suite now includes parameterized synthetic manufacturing, healthcare,
+finance, education and retail schemas with unrelated column names; arbitrary
+composite grouping keys; missing configured target/entity/key/time/split
+cases; exact target copies and reversible encodings; UTC-aware timestamps;
+randomized-holdout skipped status; cross-partition configured-key matching;
+train-only imputation; and a 6,224-row arbitrary-schema composite-key
+regression. The large synthetic case detected the one intentionally
+cross-partition composite entity group and returned its actual source row
+positions. These tests demonstrate the exercised schemas, not universal
+compatibility or production-scale performance.
+
+For imputation, tests verify training-only fitted values despite an extreme
+test-partition value, protected target/entity/comparison-key/time/split
+columns, explicit confirmation, stale-preview rejection, source-byte
+preservation, idempotent retry, downloaded output hash and post-operation
+verification. For consolidated remediation, tests check configuration
+snapshot propagation into preview/manifest, detector reevaluation, findings
+resolved only after verified postconditions, and skipped checks not counted
+as passes.
+
+### Browser and data safety status
+
+- **Browser E2E: NOT RUN for this maintenance.** The previous supplied dataset
+  and credentials were not used; the 12,001-row prior dataset was not present
+  as a confirmed safe fixture. Do not infer live browser behavior from these
+  test results.
+- No project database, project storage, original user dataset, or credential
+  was copied into the backend test environment. The suite used disposable
+  SQLite and temporary storage fixtures.
+- No migration or schema change was made.
+- No staging, commit, reset, clean, or Git history operation was performed.
+
+### Additional manual verification
+
+On Windows, use a disposable account and disposable CSV containing
+arbitrarily named entity, target, time, split, comparison-key and missing-value
+columns:
+
+1. In Analysis Setup, select the target/entity/time/split roles manually,
+   confirm, then run analysis. Verify the displayed and persisted operation
+   configuration matches those exact choices.
+2. Choose two entity columns and confirm the composite key; check detector
+   evidence lists both columns and source row positions. Try missing values
+   and verify applicability is review-required rather than passed.
+3. Test No Split and an existing split. Confirm split-dependent checks show
+   skipped in No Split, and existing mode rejects invalid membership without
+   generating or changing a split.
+4. In Remediation Center, preview a group-aware split or target-feature
+   exclusion, inspect the manifest, confirm, and verify actual output rows,
+   columns and hashes. Confirm unresolved findings remain open/review-required.
+5. In the imputation panel, select a training partition and missing-value
+   strategies, preview fitted values, cancel once, then confirm a fresh
+   preview. Download the separate CSV and verify test rows did not influence
+   fitted values; compare the source hash before and after.
+6. Inspect operation history and the JSON manifest for the selected roles,
+   fitted parameters, detector statuses, skipped checks, and hashes.
+
+## Post-remediation verification consistency regression — 2026-11-05
+
+The reported operation manifest/report were not found in the checkout; the
+investigation therefore reproduced the inconsistent states through synthetic
+fixtures and inspected the persisted service/report code. The new regression
+tests use arbitrary field names and temporary SQLite/storage fixtures.
+
+| Command | Environment | Result | Status |
+|---|---|---|---|
+| `rtk proxy python -m pytest tests/test_remediation_plans.py -q` | `backend/`, per-test temporary SQLite and storage | **19 passed**, 24 warnings | PASS |
+| `$env:DATABASE_URL='sqlite:///C:/Users/sanja/AppData/Local/Temp/dlcv-verification-fix-20261105-r2.sqlite'; rtk proxy python -m pytest -q` | `backend/`; default engine directed to a temporary database, per-test fixtures remain isolated | **307 passed, 1 skipped, 247 warnings**, 134.34s | PASS |
+| `rtk proxy npm test` | Repository root | **95 passed, 0 failed, 0 skipped** | PASS |
+| `rtk proxy npm run lint` | Repository root; script runs `tsc --noEmit` | Passed, no diagnostics | PASS |
+| `rtk proxy npm run build -- --outDir C:\Users\sanja\AppData\Local\Temp\dlcv-postremediation-build-20261105` | Repository root; approved filesystem-access retry | Passed; 2,282 modules transformed | PASS |
+| `rtk proxy git diff --check -- backend/app/services/remediation_service.py backend/tests/test_remediation_plans.py` | Repository root | Passed; only Git line-ending advisories | PASS |
+
+The backend suite emitted 247 pre-existing warnings, primarily Starlette/
+httpx, SQLAlchemy, Pydantic, optional PyArrow and timestamp format warnings.
+The build warned that Node 20.13.1 is below the Vite minimum, emitted the
+existing Vite `__dirname` config-loader advisory, noted that the output
+directory is external, and reported an approximately 950 kB JS chunk. The
+first restricted build attempt failed with `EPERM` while Node resolved
+`C:\Users\sanja`; the approved retry passed. No browser test was performed.
+
+The regression scenarios verify: duplicate and contamination selection use
+original row identities after multiple transformations; the canonical
+duplicate is required; a retained contamination identity cannot disappear
+while the global detector returns zero; chronology cannot move a retained
+record to the other partition; incompatible preview is rejected; report,
+manifest, finding status and detector status agree on failed verification;
+and successful combined transformation/report/manifest state is consistent.
+
+No endpoint, request/response schema, database model, or migration changed.
+No project database or original dataset was used. The provided failed
+manifest/report and browser workflow remain NOT VERIFIED.
+
+## Follow-up: feature-exclusion interaction with contamination verification (2026-11-05)
+
+The named finding and uploaded manifest/report were searched for in the
+checkout but were not available. Inspection identified a reproducible generic
+path: contamination verification treated an evidence `matching_fields`
+column missing from the output as an invalid finding, even when the plan
+explicitly excluded that feature. This is consistent with a consolidated
+operation that also removes the evidenced copy, leaving zero output groups,
+but the unavailable persisted finding cannot be positively matched to that
+exact evidence case.
+
+An API-level synthetic regression used arbitrary column names and persisted
+duplicate, target-leakage and contamination findings. Before the fix, the
+output scan returned zero remaining contamination groups while the selected
+contamination policy check failed. After the fix, source evidence is checked
+against original rows; retained and excluded identities and partition
+membership are verified; and an approved feature exclusion may be validated
+through the source-identity/output-projection map. Where matching fields
+remain in the output, their hash and partition state are still checked.
+Verification basis is recorded in operation metadata/manifest. No source file
+is changed.
+
+Existing API regressions also exercise:
+- contamination retention without chronology;
+- chronology without contamination;
+- a compatible combined duplicate/target-exclusion/chronology/contamination
+  plan where the excluded target-derived feature was an evidence field;
+- rejection during preview when chronology moves a specifically retained
+  source row;
+- zero aggregate groups with a failed selected identity postcondition;
+- report/manifest/finding status consistency for successful and failed
+  verification.
+
+Fresh commands and results:
+
+| Command | Result |
+|---|---|
+| `DATABASE_URL=sqlite:///C:/Users/sanja/AppData/Local/Temp/dlcv-remediation-focused-final-r2-20261105.sqlite; PYTHONDONTWRITEBYTECODE=1; rtk proxy python -m pytest tests/test_remediation_plans.py -q -p no:cacheprovider` (from `backend/`) | **20 passed, 25 warnings**, 7.36s |
+| `DATABASE_URL=sqlite:///C:/Users/sanja/AppData/Local/Temp/dlcv-remediation-full-final-r2-20261105.sqlite; PYTHONDONTWRITEBYTECODE=1; rtk proxy python -m pytest tests -q -p no:cacheprovider` (from `backend/`) | **307 passed, 1 skipped, 248 warnings**, 83.43s |
+| `rtk proxy npm test` | **95 passed, 0 failed, 0 skipped** |
+| `rtk proxy npm run lint` | Passed (`tsc --noEmit`) |
+| `rtk proxy npx tsc --noEmit` | Passed |
+| `rtk proxy npm run build -- --outDir C:\Users\sanja\AppData\Local\Temp\dlcv-contamination-build-20261105-r1` | Passed; 2,282 modules |
+| `rtk proxy git diff --check` | Exit 0; no whitespace errors |
+
+The first build attempt was blocked before Vite startup by sandbox `EPERM`
+resolving `C:\Users\sanja`; the approved filesystem-access retry passed and
+wrote only to the new temporary output directory. Existing warnings include
+Node 20.13.1 below the Vite minimum, Vite's `__dirname` config-loader warning,
+the approximately 950 kB JS chunk advisory, and existing Python/httpx/
+SQLAlchemy/Pydantic/pandas warnings.
+
+No browser test was performed. The exact supplied failed-operation artifacts
+remain unavailable; authenticated UI and browser download verification remain
+NOT VERIFIED. Backend tests used per-test temporary databases/storage plus a
+temporary default database URL; no project database, source CSV, schema or
+migration was used.
+
+## Profiling, partition distribution, and report milestone (2026-11-05)
+
+### Backend verification
+
+Tests ran from a disposable copy of `backend/`. The copy excluded the
+repository database, storage, environment file, and bytecode; the test process
+used `DATABASE_URL=sqlite:///./test.db`, plus per-test temporary SQLite and
+storage fixtures.
+
+- Full command in the disposable copy: `python -m pytest -q` — **329 passed,
+  1 skipped, 257 warnings** (86.48s).
+- Focused command in a separate disposable copy:
+  `python -m pytest -q tests/test_profiling_service.py tests/test_profiling_api.py tests/test_partition_distribution_service.py tests/test_profiling_distribution_reports_api.py`
+  — **21 passed, 16 warnings** (3.50s).
+
+Coverage includes mixed numeric/categorical/datetime profiling, invalid and
+missing values, high-cardinality bounds, empty CSVs, arbitrary schemas,
+owner-scoped profiling and partition APIs, selected non-default partition
+labels, stale-source rejection, persisted comparison retrieval, report
+section association, and JSON/HTML/PDF/CSV downloads and authorization.
+
+### Frontend and build verification
+
+- `rtk proxy npm test` — **100 passed, 0 failed, 0 skipped**.
+- `rtk proxy npm run lint` — passed (`tsc --noEmit`).
+- `rtk proxy npm run build -- --outDir C:\Users\sanja\AppData\Local\Temp\DLCV-profiling-reports-build-20261105-r2`
+  — passed, **2,283 modules transformed**.
+- The build emitted warnings: Node 20.13.1 is below the installed Vite
+  requirement, the Vite config uses `__dirname` under its native loader, and
+  the minified main JS chunk exceeds 500 kB.
+
+The first restricted build attempt failed before Vite startup because Node
+could not resolve `C:\Users\sanja` (`EPERM`). The approved retry succeeded and
+wrote only to the unique temporary output path above.
+
+### Browser status and manual runbook
+
+No browser automation/E2E run was performed. The Node tests exercise API
+contracts and presentation helpers, not real page navigation, chart rendering,
+session behavior, or browser downloads. To manually verify after starting the
+existing backend and frontend:
+
+1. Sign in and open a tabular dataset detail page. Check Profile for the actual
+   persisted row/column, missing, duplicate, numeric, categorical, and
+   datetime values; refresh and confirm no source file is changed.
+2. Confirm Analysis Setup and run analysis with an existing split. Open
+   Partition Distribution Analysis from the dataset page; select two
+   observed labels and run comparison. Verify the displayed target/class
+   chart and feature metrics match the backend result.
+3. Generate a report for that same dataset. Open the report and download each
+   JSON, HTML, PDF, and CSV format; confirm unavailable analyses are labeled
+   not performed, not passed.
+4. Change the isolated test source file only in a disposable environment and
+   confirm persisted profile/distribution retrieval reports the integrity
+   conflict.
+
+Actual user-dataset behavior, authenticated browser navigation, responsive
+chart rendering, and file-save prompts remain **NOT VERIFIED**.
+
+The specifically named regression files `01_healthcare_visits.csv` and
+`02_retail_orders.csv` were not present in the repository file listing, so
+they were not executed. Generalization coverage instead used disposable
+manufacturing, education, finance, retail, and arbitrary-column synthetic
+fixtures; this does not substitute for validating the unavailable files.

@@ -419,6 +419,7 @@ def download_operation_output(
         "repair": PROCESSED_DIR,
         "combined_repair": PROCESSED_DIR,
         "consolidated_remediation": PROCESSED_DIR,
+        "train_only_imputation": PROCESSED_DIR,
         "quarantine": QUARANTINE_DIR,
     }
     output_directory = output_directories.get(operation.operation_type)

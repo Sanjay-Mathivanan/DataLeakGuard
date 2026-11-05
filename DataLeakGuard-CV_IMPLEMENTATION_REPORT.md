@@ -506,3 +506,231 @@ Fresh UI verification at this checkpoint: frontend suite **81 passed**;
 **14 passed**. Full backend regression, production build, live browser
 interaction and real download verification remain pending and must not be
 inferred from these results. No database schema change was made.
+
+## Generic detector configuration, verification and preprocessing — 2026-11-04
+
+The shared configuration path now carries user-selected single/composite
+entity columns, optional contamination comparison keys, target, timestamp,
+split, temporal objective, and explicit confirmation through Analysis Setup,
+the typed frontend request, backend validation, persisted dataset profile and
+analysis audit event. Remediation preview binds the persisted configuration
+snapshot and carries it through execution, output verification and the JSON
+manifest. Missing or invalid role configuration is not replaced with a guessed
+column.
+
+Entity overlap supports generic composite keys. Rows with incomplete key or
+split values are excluded from grouping and cause review-required
+applicability. Group-aware remediation uses a deterministic seeded greedy
+heuristic to keep each whole entity group in one partition and approximately
+balance row count and the explicitly selected target-class distribution.
+It is not a statistically optimal stratified group splitter.
+
+Target leakage now distinguishes exact copies and reversible encodings from
+suspected one-way deterministic associations. It avoids classifying
+high-cardinality identifiers solely from a one-way mapping. Exclusion remains
+an explicit user-selected model-input transformation; the target and original
+upload are preserved. Temporal validation normalizes parseable timestamps to
+UTC and distinguishes future-prediction from randomized-holdout objectives;
+the latter is explicitly skipped for chronology. Invalid timestamps and
+incomplete keys/membership are not counted as passing checks. Contamination
+supports exact cross-partition row content or a user-configured comparison
+key, with record/partition references and review status when configured keys
+are missing. Fuzzy-similarity matches are not automatically generated.
+
+Added owner-scoped train-only imputation preview and execution APIs plus a
+Remediation Center panel. Mean, median, mode, constant, and leave-missing
+strategies are user-selected; fitted values are calculated using only the
+selected training partition and applied to a separate CSV. Configured target,
+entity, comparison-key, timestamp, and split columns are protected. Source
+hash, output hash, row/column/split preservation, round-trip content, protected
+columns, and selected missing counts are checked before the operation is
+reported verified.
+
+Fresh verification on 2026-11-04:
+
+- `python -m pytest tests -q -p no:cacheprovider` in disposable source copy
+  `C:\Users\sanja\AppData\Local\Temp\DLCV-generic-final-review-y0u7qsdq\backend`:
+  **301 passed, 1 skipped, 244 warnings**. Includes five synthetic domain
+  schemas and a 6,224-row arbitrary-column composite-key regression. The
+  project database/storage were not copied or used.
+- `python -m compileall -q app tests` in that copy: passed.
+- Frontend `npm test`: **95 passed, 0 failed, 0 skipped**.
+- `npm run lint` (`tsc --noEmit`): passed.
+- Production build to
+  `C:\Users\sanja\AppData\Local\Temp\DLCV-generic-final-build-20261104-r2`:
+  passed; 2,282 modules. Existing advisories: Node 20.13.1 is below Vite's
+  minimum; Vite reports the existing `__dirname` config-loader warning; the
+  minified JavaScript bundle is about 950 kB.
+
+No schema or migration change was made. No real/supplied user dataset or
+authenticated browser flow was tested in this maintenance. Browser E2E and
+production-scale memory/latency remain NOT VERIFIED. The newly added imputed
+output is CSV; XLSX train-only imputation is not supported by this endpoint.
+
+## Post-remediation verification consistency fix — 2026-11-05
+
+The supplied failed-operation manifest/report were not present in this
+checkout, so the reported counts and statuses were treated as investigation
+inputs rather than independently opened artifacts. Source inspection confirmed
+that global detector scans and selected-finding verification did not share a
+stable source-row identity contract. A zero-count output scan could therefore
+coexist with a selected exact-duplicate failure after the selected canonical
+record was not established. Contamination verification also accepted an empty
+matching output because “at most one partition” is true for zero rows, without
+proving that the explicitly retained source record survived in the requested
+partition.
+
+Remediation execution now maps every output row back to an identity derived
+from the immutable source SHA-256 and original zero-based source position.
+Verification compares the persisted output to the expected transformed source
+projection, validates quarantine identities/content, and checks that
+keep-first duplicate groups retain their canonical source row. Contamination
+retention verifies each expected retained identity and partition and that
+evidenced excluded copies are absent; quarantine verifies exact evidence
+identities are absent from the clean output and preserved in the quarantine
+artifact. Failed selected postconditions downgrade the corresponding
+detector result to `review_required`, even if a global scan reports zero
+remaining groups. Findings are resolved only after row-level and artifact
+integrity checks pass.
+
+Preview rejects a chronology transformation that moves a source row away
+from the explicitly retained contamination partition. Transformation
+assignments and removals remain expressed in original-source positions, so
+chronology, duplicate removal, feature exclusion, and contamination policy
+verification do not reinterpret positions after filtering.
+
+No API endpoint, database model, schema, or migration changed. Added
+dataset-independent regression coverage for a combined arbitrary-schema
+operation, conflicting temporal/retention constraints, missing canonical
+duplicate rows, missing retained contamination rows, and consistent
+failed-operation report/manifest statuses. Fresh verification:
+
+- Backend: **307 passed, 1 skipped, 247 warnings**; disposable SQLite URL and
+  per-test isolated database/storage fixtures.
+- Frontend: **95 passed, 0 failed, 0 skipped**.
+- `npm run lint` (`tsc --noEmit`): passed.
+- Production build: passed, 2,282 modules transformed.
+- Browser E2E and the supplied failed-operation artifacts: **NOT VERIFIED /
+  unavailable in this checkout**.
+
+The Vite build emitted existing environment/configuration advisories: local
+Node 20.13.1 is below Vite's stated minimum, the `__dirname` native-config
+warning, and the approximately 950 kB JavaScript chunk warning. An
+in-sandbox build attempt hit Node `EPERM` resolving the project path; the same
+build passed after filesystem-access approval, writing to a unique temporary
+output directory.
+
+## Consolidated contamination-verification correction (2026-11-05)
+
+Source inspection and an API-level synthetic reproduction found that selected
+contamination verification required every persisted `matching_fields` column
+to remain in the final output. When an explicitly approved target-feature
+exclusion removed one of those evidence columns, verification returned false
+before checking the source-row identity policy. A concurrent duplicate
+removal could leave zero aggregate contamination groups, creating the reported
+detector/finding disagreement. The supplied operation manifest/report and
+finding ID were not present in this checkout, so this generic reproduction
+demonstrates the defect but cannot establish that the unavailable record had
+the exact same evidence shape.
+
+The verifier now revalidates the matching-field hash against the immutable
+source rows, checks retained/excluded source identities and the requested
+partition, and uses the integrity-verified output-to-source projection when
+an approved feature exclusion removes comparison fields. If comparison
+fields remain, the verifier still checks their post-operation hash/partition
+state. The verification basis is persisted with each finding result.
+Chronological split assignments remain source-position based; preview
+continues to reject a cutoff that moves a retained contamination row away
+from its explicitly selected partition. No endpoint, schema, model or
+migration changed.
+
+The new arbitrary-schema API regression failed before the verifier correction:
+the aggregate detector reported zero remaining groups while
+`selected_contamination_groups_separated` was false. After the correction,
+the selected finding and aggregate result agree, the finding is resolved only
+after artifact/identity checks pass, and the manifest/report expose the
+verified result. The compatible chronology/contamination regression also
+covers a feature excluded from the contamination evidence fields.
+
+Fresh checks on 2026-11-05:
+- Focused remediation tests: **20 passed, 25 warnings**.
+- Full backend suite: **307 passed, 1 skipped, 248 warnings**.
+- Frontend suite: **95 passed, 0 failed**.
+- `npm run lint` and direct `npx tsc --noEmit`: passed.
+- Production build: passed, 2,282 modules; existing Node/Vite,
+  `__dirname`, and large-chunk advisories remain.
+- `git diff --check`: exit 0, no whitespace errors.
+
+Tests used the backend's per-test temporary SQLite/storage fixtures and an
+explicit temporary `DATABASE_URL`. No browser workflow or supplied operation
+artifact was available; browser verification remains NOT VERIFIED. The
+project database and uploaded source data were not used.
+
+## Dataset profiling, partition distribution, and report integration (2026-11-05)
+
+The existing code already had a tabular upload profile, dataset-detail
+statistics, cross-dataset distribution metrics, and persisted report records.
+The prior profile was not a complete detailed profile contract, and there was
+no within-dataset, user-selected partition comparison page/API. The report
+snapshot needed to surface the persisted detailed profile, latest
+configuration/applicability, within-dataset comparison, and remediation
+verification as distinct sections.
+
+Implemented in the existing architecture:
+
+- `app/services/profiling_service.py` calculates generic numeric, categorical,
+  datetime, duplicate, missingness, memory, and file-size statistics. Category
+  values are bounded; legacy `Dataset.columns` metadata remains compatible.
+- Owner-scoped `GET/POST /api/v1/datasets/{id}/profiling` retrieves or refreshes
+  persisted detail. Refresh verifies the registered source SHA-256 and does
+  not rewrite the uploaded file.
+- `app/services/partition_distribution_service.py` compares two explicitly
+  selected labels using the confirmed split column. Numeric results include
+  descriptive summaries and approximate KS/Wasserstein/PSI metrics; categorical
+  results include proportions, unseen categories, and total variation.
+  Configured target distribution is separated from predictor features.
+- `GET/POST /api/v1/datasets/{id}/distribution-analysis` is owner-scoped,
+  source-integrity checked, and persists the actual result in the existing
+  audit-event JSON model. Retrieval rejects a changed/missing source.
+- The Analysis page route and Dataset Detail workflow link to the new
+  Partition Distribution page. Target/class proportions and numeric target
+  summaries are now visible rather than hidden from the feature-only table.
+- Persisted report snapshots include bounded profiling, analysis
+  configuration/applicability, findings, distribution, operations,
+  verification, unresolved findings, and explicit not-performed/skipped
+  sections. JSON/HTML/PDF/CSV downloads use persisted report data and
+  owner-scoped retrieval.
+
+Two regressions were found while verifying the added tests: mixed-offset date
+strings were misclassified when one invalid timestamp lowered the sample
+parse ratio, and target metric expansion overwrote the target's `analyzed`
+status. Datetime parsing now supports mixed formats with UTC normalization and
+a documented 70% sample threshold; target status remains `analyzed` while its
+metric outcome is exposed separately as `distribution_status`. A header-only
+CSV has no inferable semantic type and therefore returns empty categorical
+statistics rather than invented numeric results.
+
+No database table, model, or migration was added. Profiles use the existing
+JSON profile field and distribution results use the existing audit-event
+details field. Generic test schemas span manufacturing, education, arbitrary
+column names, mixed numeric/categorical/datetime values, empty/high-cardinality
+profiles, missing configuration, authorization, source integrity, and report
+downloads.
+
+Fresh verification on 2026-11-05:
+
+- Focused backend profiling/distribution/report tests: **21 passed, 16
+  warnings**.
+- Full backend suite: **329 passed, 1 skipped, 257 warnings** using a
+  disposable backend copy and isolated temporary databases/storage.
+- Frontend suite: **100 passed, 0 failed, 0 skipped**.
+- `npm run lint` (`tsc --noEmit`): passed.
+- Production build: passed, 2,283 modules transformed. Existing environment
+  warnings remain: Node 20.13.1 is below the Vite minimum, Vite reports a
+  `__dirname` config-loader advisory, and the main JS chunk exceeds 500 kB.
+- Browser E2E was not run; live authenticated page and browser-download
+  behavior remain manually unverified.
+- Profile reads now reject source-integrity failures. Report snapshots mark
+  profile, analysis-derived findings, and distribution results stale when the
+  stored file is missing or does not match its registered hash; historical
+  remediation operations remain available as audit records.

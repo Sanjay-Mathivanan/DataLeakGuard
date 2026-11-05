@@ -15,12 +15,17 @@ import type {
   SplitGenerationOperation,
 } from '../types';
 
+export type TemporalEvaluationObjective = 'future_prediction' | 'randomized_holdout';
+
 export interface ConfirmedAnalysisSetup {
   confirmed: true;
   targetColumn: string;
   entityColumn: string;
+  entityColumns?: string[];
+  contaminationKeyColumns?: string[];
   splitColumn: string;
   timeColumn: string;
+  temporalObjective?: TemporalEvaluationObjective;
   splitStrategy: SplitStrategy;
   splitRatio: number;
   splitSeed: number;
@@ -42,6 +47,13 @@ export function loadConfirmedAnalysisSetup(datasetId: string): ConfirmedAnalysis
       return null;
     }
     const candidate = parsed as Partial<ConfirmedAnalysisSetup>;
+    const entityColumns = candidate.entityColumns ?? (
+      typeof candidate.entityColumn === 'string' && candidate.entityColumn
+        ? [candidate.entityColumn]
+        : []
+    );
+    const contaminationKeyColumns = candidate.contaminationKeyColumns ?? [];
+    const temporalObjective = candidate.temporalObjective ?? 'future_prediction';
     const validSplitOperation = candidate.splitOperation === null
       || (
         typeof candidate.splitOperation === 'object'
@@ -52,8 +64,15 @@ export function loadConfirmedAnalysisSetup(datasetId: string): ConfirmedAnalysis
       || !['existing', 'generated', 'none'].includes(String(candidate.splitStrategy))
       || typeof candidate.targetColumn !== 'string'
       || typeof candidate.entityColumn !== 'string'
+      || !Array.isArray(entityColumns)
+      || entityColumns.some((column) => typeof column !== 'string' || !column.trim())
+      || new Set(entityColumns).size !== entityColumns.length
+      || !Array.isArray(contaminationKeyColumns)
+      || contaminationKeyColumns.some((column) => typeof column !== 'string' || !column.trim())
+      || new Set(contaminationKeyColumns).size !== contaminationKeyColumns.length
       || typeof candidate.splitColumn !== 'string'
       || typeof candidate.timeColumn !== 'string'
+      || !['future_prediction', 'randomized_holdout'].includes(temporalObjective)
       || typeof candidate.splitRatio !== 'number'
       || !Number.isFinite(candidate.splitRatio)
       || candidate.splitRatio <= 0
@@ -66,7 +85,12 @@ export function loadConfirmedAnalysisSetup(datasetId: string): ConfirmedAnalysis
     ) {
       return null;
     }
-    return candidate as ConfirmedAnalysisSetup;
+    return {
+      ...candidate,
+      entityColumns,
+      contaminationKeyColumns,
+      temporalObjective,
+    } as ConfirmedAnalysisSetup;
   } catch {
     return null;
   }
@@ -105,6 +129,10 @@ export const AnalysisSetupPage: React.FC = () => {
     splitColumn: '',
     timeColumn: '',
   });
+  const [additionalEntityColumns, setAdditionalEntityColumns] = useState<string[]>([]);
+  const [contaminationKeyColumns, setContaminationKeyColumns] = useState<string[]>([]);
+  const [temporalObjective, setTemporalObjective] =
+    useState<TemporalEvaluationObjective>('future_prediction');
   const [splitStrategy, setSplitStrategy] = useState<SplitStrategy>('none');
   const [splitRatio, setSplitRatio] = useState(0.2);
   const [splitSeed, setSplitSeed] = useState(42);
@@ -120,6 +148,25 @@ export const AnalysisSetupPage: React.FC = () => {
       setError('A dataset identifier is required.');
       setLoading(false);
       return () => { active = false; };
+    }
+    const priorSetup = loadConfirmedAnalysisSetup(id);
+    if (priorSetup) {
+      const entityColumns = priorSetup.entityColumns ?? (
+        priorSetup.entityColumn ? [priorSetup.entityColumn] : []
+      );
+      setSelection({
+        targetColumn: priorSetup.targetColumn,
+        entityColumn: entityColumns[0] ?? '',
+        splitColumn: priorSetup.splitColumn,
+        timeColumn: priorSetup.timeColumn,
+      });
+      setAdditionalEntityColumns(entityColumns.slice(1));
+      setContaminationKeyColumns(priorSetup.contaminationKeyColumns ?? []);
+      setTemporalObjective(priorSetup.temporalObjective ?? 'future_prediction');
+      setSplitStrategy(priorSetup.splitStrategy);
+      setSplitRatio(priorSetup.splitRatio);
+      setSplitSeed(priorSetup.splitSeed);
+      setSplitOperation(priorSetup.splitOperation);
     }
     setLoading(true);
     setError(null);
@@ -160,6 +207,9 @@ export const AnalysisSetupPage: React.FC = () => {
   const updateColumn = (role: DetectorColumnRole, value: string) => {
     const field = ROLE_FIELDS[role];
     setSelection((current) => ({ ...current, [field]: value }));
+    if (role === 'entity') {
+      setAdditionalEntityColumns((current) => current.filter((column) => column !== value));
+    }
     setUserConfirmed(false);
     if (role === 'split' && value) setSplitStrategy('existing');
   };
@@ -190,9 +240,15 @@ export const AnalysisSetupPage: React.FC = () => {
     saveConfirmedAnalysisSetup(id, {
       confirmed: true,
       ...selection,
+      entityColumns: Array.from(new Set([
+        ...(selection.entityColumn ? [selection.entityColumn] : []),
+        ...additionalEntityColumns,
+      ])),
+      contaminationKeyColumns,
       splitStrategy,
       splitRatio,
       splitSeed,
+      temporalObjective,
       splitOperation,
       confirmedAt: new Date().toISOString(),
     });
@@ -261,6 +317,15 @@ export const AnalysisSetupPage: React.FC = () => {
                   onChange={(value) => updateColumn(role, value)}
                   disabled={role === 'split' && splitStrategy !== 'existing'}
                 />
+                <p className="mt-1 text-[10px] text-slate-600" role="status">
+                  {!selection[field]
+                    ? 'Selection: missing'
+                    : !columns.some((column) => column.name === selection[field])
+                      ? 'Selection: invalid for the current dataset profile'
+                      : selection[field] === recommended?.columnName
+                      ? `Selection: ${userConfirmed ? 'user-confirmed recommendation' : 'recommended; confirmation pending'}`
+                      : `Selection: ${userConfirmed ? 'user-confirmed manual choice' : 'manual choice; confirmation pending'}`}
+                </p>
                 <div className="mt-3 rounded-md border border-slate-200 bg-white p-3">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Recommendation</p>
@@ -300,6 +365,123 @@ export const AnalysisSetupPage: React.FC = () => {
             );
           })}
         </div>
+        <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50 p-3">
+          <p className="text-xs font-semibold text-slate-800">Composite entity key (optional)</p>
+          <p className="mt-1 text-[11px] text-slate-600">
+            Use multiple columns only when their combination defines one grouping unit. The system will not infer or add identifiers.
+          </p>
+          {additionalEntityColumns.map((column, index) => (
+            <div key={`${column}-${index}`} className="mt-2 flex items-end gap-2">
+              <div className="min-w-0 flex-1">
+                <SearchableColumnSelector
+                  label={`Additional entity key column ${index + 1}`}
+                  value={column}
+                  columns={columns}
+                  onChange={(value) => setAdditionalEntityColumns((current) => {
+                    const next = [...current];
+                    if (!value || value === selection.entityColumn || next.some((item, itemIndex) => itemIndex !== index && item === value)) {
+                      next.splice(index, 1);
+                    } else {
+                      next[index] = value;
+                    }
+                    setUserConfirmed(false);
+                    return next.filter(Boolean);
+                  })}
+                />
+              </div>
+              <button type="button" onClick={() => {
+                setAdditionalEntityColumns((current) => current.filter((_, itemIndex) => itemIndex !== index));
+                setUserConfirmed(false);
+              }}
+                className="rounded border border-slate-300 bg-white px-3 py-2 text-xs text-slate-700">
+                Remove
+              </button>
+            </div>
+          ))}
+          <button type="button"
+            disabled={!selection.entityColumn || additionalEntityColumns.length >= 4}
+            onClick={() => {
+              setAdditionalEntityColumns((current) => [...current, '']);
+              setUserConfirmed(false);
+            }}
+            className="mt-3 rounded border border-teal-300 bg-white px-3 py-2 text-xs font-semibold text-teal-800 disabled:opacity-50">
+            Add grouping column
+          </button>
+          <p className="mt-2 text-[11px] text-slate-600">
+            Selected key: <span className="font-mono">
+              {[selection.entityColumn, ...additionalEntityColumns].filter(Boolean).join(' + ') || 'Not selected'}
+            </span>
+          </p>
+        </div>
+        <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50 p-3">
+          <p className="text-xs font-semibold text-slate-800">Contamination comparison key (optional)</p>
+          <p className="mt-1 text-[11px] text-slate-600">
+            Select fields that identify the same sample across partitions. Without a configured key, analysis compares exact row content. Similarity alone is not treated as contamination.
+          </p>
+          {contaminationKeyColumns.map((column, index) => (
+            <div key={`contamination-key-${index}`} className="mt-2 flex items-end gap-2">
+              <div className="min-w-0 flex-1">
+                <SearchableColumnSelector
+                  label={`Comparison key column ${index + 1}`}
+                  value={column}
+                  columns={columns}
+                  onChange={(value) => {
+                    setContaminationKeyColumns((current) => {
+                      const next = [...current];
+                      if (!value || next.some((item, itemIndex) => itemIndex !== index && item === value)) {
+                        next.splice(index, 1);
+                      } else {
+                        next[index] = value;
+                      }
+                      return next.filter(Boolean);
+                    });
+                    setUserConfirmed(false);
+                  }}
+                />
+              </div>
+              <button type="button"
+                onClick={() => {
+                  setContaminationKeyColumns((current) => current.filter((_, itemIndex) => itemIndex !== index));
+                  setUserConfirmed(false);
+                }}
+                className="rounded border border-slate-300 bg-white px-3 py-2 text-xs text-slate-700">
+                Remove
+              </button>
+            </div>
+          ))}
+          <button type="button"
+            disabled={contaminationKeyColumns.length >= 4}
+            onClick={() => {
+              setContaminationKeyColumns((current) => [...current, '']);
+              setUserConfirmed(false);
+            }}
+            className="mt-3 rounded border border-teal-300 bg-white px-3 py-2 text-xs font-semibold text-teal-800 disabled:opacity-50">
+            Add comparison field
+          </button>
+          <p className="mt-2 text-[11px] text-slate-600">
+            Selected comparison: <span className="font-mono">{contaminationKeyColumns.filter(Boolean).join(' + ') || 'Exact row content'}</span>
+          </p>
+        </div>
+        <div className="mt-4 grid gap-2 rounded-lg border border-slate-200 bg-slate-50 p-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,2fr)]">
+          <label className="text-xs font-semibold text-slate-800" htmlFor="temporal-objective">
+            Temporal evaluation objective
+            <select
+              id="temporal-objective"
+              value={temporalObjective}
+              onChange={(event) => {
+                setTemporalObjective(event.target.value as TemporalEvaluationObjective);
+                setUserConfirmed(false);
+              }}
+              className="mt-1 block w-full rounded border border-slate-300 bg-white px-2 py-2 font-normal"
+            >
+              <option value="future_prediction">Predict future events</option>
+              <option value="randomized_holdout">Randomized holdout</option>
+            </select>
+          </label>
+          <p className="self-end text-[11px] text-slate-600">
+            Future prediction checks that later partitions do not overlap or precede earlier partitions. Randomized holdout skips timestamp-range leakage interpretation because temporal overlap is expected; missing/invalid timestamps remain visible for review.
+          </p>
+        </div>
       </section>
 
       <SplitStrategyPanel
@@ -337,8 +519,10 @@ export const AnalysisSetupPage: React.FC = () => {
         <h2 className="text-sm font-semibold text-slate-900">Configuration to be analyzed</h2>
         <dl className="mt-3 grid gap-x-4 gap-y-2 text-xs sm:grid-cols-2">
           <dt className="text-slate-500">Target</dt><dd className="break-all font-mono">{selection.targetColumn || 'Not selected'}</dd>
-          <dt className="text-slate-500">Entity</dt><dd className="break-all font-mono">{selection.entityColumn || 'Not selected'}</dd>
+          <dt className="text-slate-500">Entity key</dt><dd className="break-all font-mono">{[selection.entityColumn, ...additionalEntityColumns].filter(Boolean).join(' + ') || 'Not selected'}</dd>
+          <dt className="text-slate-500">Contamination comparison</dt><dd className="break-all font-mono">{contaminationKeyColumns.filter(Boolean).join(' + ') || 'Exact row content'}</dd>
           <dt className="text-slate-500">Timestamp</dt><dd className="break-all font-mono">{selection.timeColumn || 'Not selected'}</dd>
+          <dt className="text-slate-500">Temporal objective</dt><dd>{temporalObjective === 'future_prediction' ? 'Predict future events' : 'Randomized holdout (chronology skipped)'}</dd>
           <dt className="text-slate-500">Split strategy</dt><dd>{splitStrategy}</dd>
           <dt className="text-slate-500">Split column</dt><dd className="break-all font-mono">{selection.splitColumn || (splitOperation ? 'Generated split output' : 'Not selected')}</dd>
         </dl>

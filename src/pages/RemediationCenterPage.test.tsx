@@ -2,11 +2,12 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import type { PersistedFinding } from '../types';
+import type { Dataset, PersistedFinding } from '../types';
 import {
   DetectorActionConfiguration,
   DetectorSection,
   getActionOptions,
+  hydrateActionConfigurations,
   REMEDIATION_DETECTORS,
 } from './RemediationCenterPage';
 
@@ -43,6 +44,54 @@ test('Remediation Center action menu only exposes strategies supported for each 
     REMEDIATION_DETECTORS.some((detector) => detector.actions.some((action) => /delete all/i.test(action.label))),
     false,
   );
+});
+
+test('confirmed analysis columns hydrate remediation selectors without selecting automatic actions', () => {
+  const dataset = {
+    id: 'sensor-dataset',
+    name: 'sensor events',
+    type: 'tabular',
+    format: 'CSV',
+    issuesCount: 0,
+    uploadedAt: '2026-11-04T00:00:00Z',
+    profile: {
+      analysisColumns: {
+        targetColumn: 'anomaly_label',
+        entityColumn: 'sensor_id',
+        timeColumn: 'event_time',
+        splitColumn: 'dataset_split',
+      },
+      splitStrategy: {
+        strategy: 'existing',
+        testRatio: 0.25,
+        randomSeed: 17,
+      },
+    },
+    columns: [
+      { name: 'anomaly_label', type: 'bool', missingCount: 0, uniqueCount: 2 },
+      { name: 'sensor_id', type: 'string', missingCount: 0, uniqueCount: 2 },
+      { name: 'event_time', type: 'datetime', missingCount: 0, uniqueCount: 2 },
+      { name: 'dataset_split', type: 'string', missingCount: 0, uniqueCount: 2 },
+    ],
+  } as Dataset;
+  const hydrated = hydrateActionConfigurations(dataset);
+  assert.equal(hydrated.entity_overlap.config.entityColumn, 'sensor_id');
+  assert.equal(hydrated.entity_overlap.config.targetColumn, 'anomaly_label');
+  assert.equal(hydrated.temporal_leakage.config.timeColumn, 'event_time');
+  assert.equal(hydrated.train_test_contamination.config.splitColumn, 'dataset_split');
+  assert.equal(hydrated.entity_overlap.action, 'review_only');
+  assert.equal(hydrated.exact_duplicate.action, 'exact_duplicate_keep_first');
+
+  const manuallyChanged = hydrateActionConfigurations(dataset, {
+    ...hydrated,
+    entity_overlap: {
+      action: 'rebuild_group_split',
+      config: { entityColumn: 'machine_id', randomSeed: 19 },
+    },
+  });
+  assert.equal(manuallyChanged.entity_overlap.config.entityColumn, 'machine_id');
+  assert.equal(manuallyChanged.entity_overlap.config.targetColumn, 'anomaly_label');
+  assert.equal(manuallyChanged.entity_overlap.action, 'rebuild_group_split');
 });
 
 test('target remediation requires explicit target and feature review while preserving target', () => {

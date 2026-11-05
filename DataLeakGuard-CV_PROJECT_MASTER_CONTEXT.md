@@ -1,7 +1,7 @@
 # DataLeakGuard-CV — Project Master Context
 
 > **Project title:** DataLeakGuard-CV — An Evidence-Based Integrity Assurance Platform for Trustworthy Machine Learning and Computer Vision Pipelines  
-> **Updated:** 29 October 2026  
+> **Updated:** 4 November 2026
 > **Purpose:** A reusable project context for future ChatGPT, Claude Code, and developer sessions.
 
 ## 1. Project Goal
@@ -402,3 +402,133 @@ this Batch 2 continuation.
   supplied synthetic dataset execution and production-scale memory/latency
   are NOT VERIFIED. Existing deployment caveats remain; no production-ready
   claim is made.
+
+## Generic leakage/remediation maintenance update (2026-11-04)
+
+Current source includes generalized user-confirmed analysis configuration for
+arbitrary single/composite entity keys, target, timestamp, split, temporal
+objective and optional contamination comparison keys. Configuration is
+validated at the API, persisted in dataset profile/audit metadata, and carried
+into remediation plan and manifest snapshots. Recommendations remain advisory
+and do not silently replace manual configuration.
+
+Composite entity overlap and exact/configured-key cross-partition
+contamination include evidence and applicability states. Missing configuration
+is requires-configuration or skipped; missing values in configured keys,
+timestamps or split membership are review-required rather than clean passes.
+Target leakage reports exact copies, reversible mappings and suspected
+deterministic associations without treating every correlation as confirmed.
+Temporal checks distinguish future-prediction from randomized holdout and
+normalize timestamps to UTC. Evidence-backed remediation preserves the
+original source and verifies the actual output.
+
+Optional train-only imputation is available at
+`POST /api/v1/datasets/{id}/preprocessing/imputation/preview` and
+`POST /api/v1/datasets/{id}/preprocessing/imputation/execute`. It fits selected
+mean/median/mode values on a specified training partition only, supports
+constant and leave-missing policies, protects configured analysis columns,
+requires preview confirmation and writes a separate CSV operation. Source and
+output hashes plus postconditions are persisted. XLSX imputation and large
+scale/background-job performance are not verified/supported by this route.
+
+Fresh 2026-11-04 automated regression: backend **301 passed, 1 skipped, 244
+warnings** in a disposable source copy; frontend **95 passed**; TypeScript
+check and Python compilation passed; production build passed (2,282 modules).
+The build has existing Node/Vite/config-loader/chunk advisories. Browser E2E
+and the supplied prior dataset remain NOT VERIFIED; automated tests do not
+establish live browser behavior. No database schema/migration change was made.
+
+## Post-remediation verification consistency fix (2026-11-05)
+
+`remediation_service.py` now carries an explicit output-ordinal-to-original-
+source-position map. Row identity is bound to the original source SHA-256 and
+zero-based source position. The verifier validates the map digest and compares
+the actual CSV readback to the expected projection after configured split
+updates, row removals and feature exclusions. Quarantine output receives
+parallel source-identity and readback checks.
+
+Selected exact-duplicate findings require the deterministic keep-first source
+row to remain; zero detected duplicates after deleting the whole group is not
+resolution. Selected contamination findings require the user-selected
+retained source row(s) to survive in the requested partition and the evidenced
+copies to be removed, or require all evidence rows to be preserved in
+quarantine. A failed per-finding postcondition reconciles the aggregate
+detector state to `review_required`; it cannot be hidden by a zero-count
+detector scan. Finding status changes happen only after identity, file
+round-trip, source hash and output hash checks pass.
+
+Preview rejects chronological split assignments that move a contamination
+row out of its explicitly retained partition. All operations use immutable
+source positions, and incompatible constraints fail before execution. No API,
+database schema, or migration changed.
+
+Fresh 2026-11-05 suite results: backend **307 passed, 1 skipped, 247 warnings**;
+frontend **95 passed**; `npm run lint` / TypeScript passed; production build
+passed. Browser interaction and the provided failed-operation manifest/report
+were unavailable and remain NOT VERIFIED. Existing Node/Vite/config-loader/
+bundle-size advisories remain; no project database/storage was used.
+
+### Follow-up verification mismatch correction (2026-11-05)
+
+A new synthetic API regression reproduced a selected contamination policy
+failing while the aggregate output scan reported zero remaining groups. The
+cause was the verifier requiring all original contamination `matching_fields`
+to exist in the output even when a selected, confirmed feature exclusion
+intentionally removed one. The verifier now validates the evidence hash
+against the source, proves retained/excluded rows using stable source
+identities and the verified output projection, and checks the retained
+partition. It still uses output matching fields when they remain available.
+The verification basis is persisted. The unavailable uploaded operation
+artifacts were not independently inspected, so the reproduction proves the
+generic code defect and symptom, not the exact stored evidence for the named
+finding.
+
+Chronology/contamination constraints are rechecked during preview; compatible
+combined transformations remain valid, and a cutoff that moves a retained row
+is rejected before execution. Fresh regression: focused remediation **20
+passed**, full backend **307 passed, 1 skipped**, frontend **95 passed**,
+TypeScript/lint and production build passed, and `git diff --check` exited 0.
+Browser verification remains NOT VERIFIED. No API, database schema, migration,
+project database, or source dataset was changed or used.
+
+## Dataset analysis and reporting milestone (2026-11-05)
+
+Current architecture additions/reuse:
+
+- Tabular upload and manual profile refresh persist detailed generic profile
+  fields in `Dataset.profile` JSON and adapt the same data to existing
+  `Dataset.columns` metadata; no migration is required.
+- The new profiling service classifies numeric, categorical, and sufficiently
+  parseable datetime fields, bounds category display, and reports missing,
+  duplicate, range, and quality metrics. Refresh is rejected if the uploaded
+  source hash no longer verifies.
+- Partition distribution analysis requires the persisted user-selected split
+  column and two actually observed labels. The latest response is persisted as
+  an authenticated audit event; retrieval checks source integrity and stale
+  hashes. Approximate KS, empirical Wasserstein, quantile-binned PSI, and
+  categorical total-variation/unseen-category metrics are descriptive only.
+- Target/class distribution is analyzed separately from predictor features
+  and shown in the new `/distribution-analysis` page alongside numeric and
+  categorical feature comparisons.
+- Existing report persistence now includes per-dataset profile, analysis
+  configuration/applicability, findings, distribution comparison, remediation
+  operation/verification summaries, unresolved items, and not-performed
+  sections. Authenticated report detail/download supports JSON, HTML, PDF,
+  and flattened CSV.
+
+No report or analysis fabricates detector results, model evaluation,
+performance estimates, or assurance decisions. The profile service currently
+uses pandas in-memory loading; the API bounds categorical displays but does
+not provide streaming/async profiling. The PDF is a plain text snapshot, not a
+fully typeset analytical document. Browser E2E and large-scale resource
+behavior remain unverified.
+
+Profile retrieval and report snapshot generation both check the actual source
+hash. When source integrity fails, current-derived profile, analysis/finding
+and distribution sections are labeled stale rather than represented as current;
+historical operations remain preserved.
+
+Latest verification: backend **329 passed, 1 skipped**; focused profile/
+distribution/report tests **21 passed**; frontend **100 passed**;
+TypeScript/lint passed; production build passed (2,283 modules) with Node/Vite
+and bundle-size advisories. No database schema or migration change was made.

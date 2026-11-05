@@ -136,12 +136,15 @@ The phase names below reflect the project context and the current source. Histor
 
 | Phase | Objective and implementation | Main modules / API | Status and limits |
 |---|---|---|---|
-| **1 — Backend Foundation** | FastAPI app, configuration, SQLAlchemy session/base, CORS and health route. | `backend/app/main.py`, `core/config.py`, `db/`; `GET /api/v1/health` | Implemented. No backend authentication/authorization layer was found. |
+| **1 — Backend Foundation** | FastAPI app, configuration, SQLAlchemy session/base, CORS, health, authentication and owner-scoped routes. | `backend/app/main.py`, `core/config.py`, `db/`; `GET /api/v1/health`, auth routes | Implemented in source. Deployment schema/configuration and production security still require environment-specific verification. |
 | **2 — Upload and Profiling** | Validate accepted type/extension, enforce configured upload size, store original under a generated name, hash it, profile tabular data and persist metadata/preview. ZIP supports basic image profiling. | `api/v1/datasets.py`, `core/dataset_service.py`, `utils/file_storage.py`, profiling utilities; `POST /api/v1/datasets` and dataset read/profile routes | Implemented for supported upload paths. CSV/XLSX are the supported tabular formats; ZIP does not enable CV leakage detection. |
 | **3 — Leakage Detection and Findings** | Run detectors against stored data and persist findings in `leakage_findings`. | `services/leakage_detection_service.py`; `POST /api/v1/datasets/{id}/analyze/leakage`, finding-list/detail routes | Five detector functions exist. Findings are heuristic signals and require human review. |
 | **4 — Evidence Architecture** | Preserve structured detector evidence and expose finding evidence with source metadata. | `services/evidence_service.py`, evidence schemas, `api/v1/findings.py`; `GET /api/v1/findings/{id}/evidence` | Implemented. Evidence detail varies by detector; temporal findings do not provide deterministic row indices for automated row selection. |
-| **5 — Repair, Quarantine, History** | Create separate repaired copies or quarantine subsets, persist operation records, expose history and secure output download. | `services/repair_service.py`, `quarantine_service.py`, `RepairRecord`; repair/quarantine/history/download routes | Implemented for supported operations. Originals are read, not rewritten. Quarantine is an output containing affected rows, not deletion from the original. |
-| **Combined Repair** | Apply explicitly selected exact-duplicate findings to one working copy, create one consolidated cleaned output and record provenance. | `generate_combined_exact_duplicate_repair`; `POST /api/v1/datasets/{id}/repairs/combined` | Implemented for CSV/XLSX exact duplicates. No general repair for other detector types. |
+| **5 — Repair, Quarantine, History** | Create separate repaired copies or quarantine subsets, persist operation records, expose history and secure output download. | `services/repair_service.py`, `quarantine_service.py`, `RepairRecord`; repair/quarantine/history/download routes | Implemented for supported operations. Originals are read, not rewritten. Quarantine is an output containing evidenced affected rows, not deletion from the original. |
+| **Combined Repair / Remediation** | Preview and confirm exact-duplicate cleaning or evidence-backed detector-specific transformations; persist plans, outputs and verification. | `services/remediation_service.py`; `/remediation-plans/*`, remediation artifact downloads | Supported transformations are bounded by evidence/configuration. Unsupported or unresolved findings remain review-required; no general causal repair is claimed. |
+| **6 — Analysis Setup and Results** | Separate manual/recommended column setup from analysis execution; display configuration, applicability, findings and skipped checks. | `AnalysisSetupPage.tsx`, `AnalysisPage.tsx`, dataset analysis API | Implemented with advisory recommendations and explicit confirmation. Browser E2E remains unverified for the current maintenance snapshot. |
+| **7 — Consolidated Remediation Center** | Detector-grouped, paginated findings, backend-validated selection, preview, confirmation, history and artifact access. | `RemediationCenterPage.tsx`, findings/remediation APIs | Implemented with server-side pagination and owner-scoped plan validation. Large-scale performance and live browser workflows remain unverified. |
+| **8 — Verification and Preprocessing** | Re-evaluate selected detector conditions on output; support optional train-only missing-value imputation. | Remediation verification service; `/preprocessing/imputation/{preview,execute}` | Implemented for supported checks and CSV output. Imputation fits on the selected training partition only; it does not alter source uploads. |
 | **Frontend integration work** | Connect analysis, persisted findings/evidence and repair operations to the UI; show truthful stage and operation states. | `AnalysisPage.tsx`, `LeakageAnalysisPage.tsx`, `RepairPage.tsx`, `api.ts` | Core workflows and the scoped artifact/provenance/distribution/impact/report screens are API-backed; fresh browser coverage remains incomplete. |
 
 ## Leakage analysis and evidence
@@ -158,7 +161,7 @@ The phase names below reflect the project context and the current source. Histor
 
 Column names must exist in the uploaded dataset. The API rejects invalid combinations/columns. The Analysis page represents detectors as not run, needs configuration, running, completed, failed, or skipped; progress should be interpreted from actual execution, not as proof that all possible checks ran.
 
-Findings store an ID, dataset ID, type, severity, status, description, JSON evidence, and creation time. The evidence endpoint returns finding fields, optional source filename/hash, and `detector_evidence`. Row indices are zero-based positions in the source dataframe where the detector supplies them. Finding status changes are not persisted through a backend status-update route.
+Findings store an ID, dataset ID, type, severity, status, description, JSON evidence, and creation time. The evidence endpoint returns finding fields, optional source filename/hash, and `detector_evidence`. Row indices are zero-based positions in the source dataframe where the detector supplies them. Configured composite entity keys and contamination comparison keys are supported; missing key components are excluded from matching and reported as review-required, not as a clean result. Target and time-dependent checks require explicit configuration. The temporal objective is recorded; randomized-holdout chronology is skipped rather than reported as passed. Finding status changes are persisted only by verified supported remediation paths.
 
 ## Repair, quarantine, and combined repair
 
@@ -181,6 +184,24 @@ Findings store an ID, dataset ID, type, severity, status, description, JSON evid
 8. Download by the persisted operation ID. The download route selects the storage directory from operation type, validates the stored basename and resolved path, and checks the output hash when one is recorded.
 
 **Previously reported isolated result (not run for this README task):** the migration and combined-repair focused tests reported **10 passed, 0 failed, 14 warnings** in a disposable project copy/database. A sample operation used 8 data rows, removed 2 duplicates, and produced 6 rows, with two applied finding IDs and input/output SHA-256 hashes. The report states the real database, backup, and storage artifacts were not modified.
+
+The consolidated remediation-plan API can also apply explicitly selected,
+evidence-backed actions: keep-first duplicate removal; group-aware split
+rebuilding (all rows for a configured single/composite entity remain together);
+confirmed target-feature exclusion while retaining the target; chronological
+split rebuilding with an explicit cutoff; and contamination handling only
+after an explicit retained-partition choice or evidence-backed quarantine.
+Unsupported actions remain review-only. The uploaded source is preserved.
+Remediation output verification reopens actual output bytes and reports
+passed/failed/skipped/review-required checks; skipped checks do not count as
+passed, and unresolved findings are not described as repaired.
+
+Optional missing-value preprocessing is a separate, explicit workflow. Mean,
+median, mode, constant and leave-missing strategies are previewed; fitted
+statistics come only from the user-selected training partition and are applied
+to a separate CSV copy. Configured target, entity, comparison-key, timestamp
+and split columns are protected from imputation. Operation metadata records
+fitted values, missing counts, hashes and post-operation verification.
 
 ## Database and migrations
 
@@ -225,7 +246,7 @@ These endpoints require the existing authenticated session and CSRF protections.
 | `GET /api/v1/datasets/{dataset_id}` | Dataset metadata. |
 | `GET /api/v1/datasets/{dataset_id}/profile` | Dataset/profile response. |
 | `DELETE /api/v1/datasets/{dataset_id}` | Delete database row only; blocked with HTTP 409 if findings/operations exist; original retained. |
-| `POST /api/v1/datasets/{dataset_id}/analyze/leakage` | Run exact duplicates and configured optional detectors; query: `entity_column`, `split_column`, `target_column`, `time_column`. |
+| `POST /api/v1/datasets/{dataset_id}/analyze/leakage` | Run exact duplicates and configured optional detectors; accepts `entity_column` or repeated `entity_columns`, `contamination_key_columns`, `split_column`, `target_column`, `time_column`, `temporal_objective`, `configuration_confirmed`, and explicit split strategy/operation fields. |
 | `GET /api/v1/datasets/{dataset_id}/findings` | List persisted findings. |
 | `GET /api/v1/findings/{finding_id}` | Retrieve one finding. |
 | `GET /api/v1/findings/{finding_id}/evidence` | Retrieve finding/evidence and source-file metadata. |
@@ -238,8 +259,18 @@ These endpoints require the existing authenticated session and CSRF protections.
 | `POST /api/v1/findings/{finding_id}/quarantine` | Create/reuse a separate output of affected rows when evidence supports safe selection. |
 | `GET /api/v1/datasets/{dataset_id}/quarantines` | Quarantine history. |
 | `GET /api/v1/quarantines/{quarantine_id}` | Retrieve a quarantine record. |
+| `POST /api/v1/datasets/{dataset_id}/remediation-plans/preview` | Validate selected findings/configuration and persist a source/evidence-bound preview. |
+| `POST /api/v1/datasets/{dataset_id}/remediation-plans/{plan_id}/execute` | Execute only with the current preview token and explicit confirmation; return actual operation/verification state. |
+| `POST /api/v1/datasets/{dataset_id}/remediation-plans/{plan_id}/cancel` | Cancel a pending preview. |
+| `GET /api/v1/datasets/{dataset_id}/remediation-plans?skip=&limit=` | Read owner-scoped remediation history. |
+| `GET /api/v1/operations/{operation_id}/remediation-artifacts/{dataset\|report\|manifest\|quarantine}` | Download owner-scoped remediation artifacts. |
+| `POST /api/v1/datasets/{dataset_id}/preprocessing/imputation/preview` | Preview train-only imputation and training-fitted values. |
+| `POST /api/v1/datasets/{dataset_id}/preprocessing/imputation/execute` | Create and verify a separate imputed copy after explicit confirmation. |
 
-These routes are defined in the registered FastAPI routers. Corresponding test files exist for health, upload, leakage, evidence, repair, quarantine, downloads, migration and combined repair; route existence alone is not a claim that every behavior was tested in this task. There is no authentication/authorization dependency on these endpoints.
+These routes are defined in registered FastAPI routers. Protected dataset,
+finding, operation and remediation routes use the authenticated user and
+owner-scoped lookups; regression tests use isolated fixtures. Route existence
+alone is not proof of browser-level behavior or production deployment safety.
 
 ## Installation and configuration
 
@@ -299,15 +330,15 @@ Typical workflow:
 
 ## Testing and verification
 
-No tests, migrations, frontend build, or type check were run during this README task. The project contains the following commands/conventions:
+The repository's configured test and check commands are:
 
 | Purpose | Command (run from `backend/` or repository root as noted) |
 |---|---|
-| Backend tests | `python -m pytest tests/ -q` from `backend/` |
+| Backend tests | `python -m pytest tests -q -p no:cacheprovider` from `backend/` (use an isolated source copy for the full suite) |
 | Migration test | `python -m pytest tests/test_operation_metadata_migration.py -v` from `backend/` |
 | Combined repair test | `python -m pytest tests/test_combined_repair.py -v` from `backend/` |
 | Migration + combined repair | `python -m pytest tests/test_operation_metadata_migration.py tests/test_combined_repair.py -v` from `backend/` |
-| Frontend tests | `node --import tsx --test src/services/api.test.ts src/pages/RepairPage.test.tsx src/components/leakage/FindingEvidencePanel.test.tsx` from repository root; add other existing `*.test.ts` files as needed. There is no `npm test` script. |
+| Frontend tests | `npm test` from repository root |
 | TypeScript check | `npm run lint` (executes `tsc --noEmit`) or `npx tsc --noEmit` from repository root. |
 | Production build | `npm run build` from repository root. |
 
@@ -315,7 +346,13 @@ No tests, migrations, frontend build, or type check were run during this README 
 
 **Previously reported test evidence:** migration plus combined repair: 10 passed, 0 failed, 14 warnings in an isolated temporary copy/database. Other historical reports include a backend run of 133 passed and 14 failed (147 total) in `PHASE_5_8E_FINAL_VERIFICATION.md`; the failures were reported there as pre-existing, but that historical attribution has not been independently revalidated here. Do not treat either report as a fresh full-suite result.
 
-Tests not verified in this task: current full backend suite, current frontend tests, current type check/build, and browser-based end-to-end workflows.
+An earlier checkpoint for the 2026-11-04 generic remediation maintenance
+reported **300 passed, 1 skipped, 243 warnings** in a disposable copy;
+`npm test` reported **95 passed**, `npm run lint` passed, and a Vite
+production build passed after an initial sandbox filesystem denial. The
+current maintenance browser workflows remain **NOT VERIFIED**. See the
+latest dated addendum below and the E2E report for exact commands and warning
+details.
 
 ## Security, limitations, and future work
 
@@ -491,3 +528,111 @@ Node/Vite version advisory, config-loader `__dirname` advisory, and a large
 JavaScript chunk. **Authenticated browser E2E remains NOT VERIFIED**; automated
 tests are not proof of live navigation or download events. Follow the manual
 checklist in `DataLeakGuard-CV_E2E_TEST_REPORT.md` using a disposable dataset.
+
+## Generic detector configuration and preprocessing update — 2026-11-04
+
+Analysis Setup accepts arbitrary user-selected single/composite entity keys,
+target, timestamp, split, temporal objective and optional contamination
+comparison keys. The API validates these fields and persists them in analysis
+profile/audit metadata. Remediation plans carry the saved configuration into
+preview, verification and the JSON manifest; missing configuration is not
+silently replaced by a guessed column.
+
+Composite entity grouping, exact/configured-key cross-partition comparison,
+UTC-normalized chronology, target-copy/reversible-mapping evidence, and
+explicit detector applicability are supported. Randomized holdout chronology
+is skipped, not passed. Incomplete configured keys/timestamps/partitions
+require review. Group-aware rebuilding uses deterministic whole-group
+assignment and approximate target-class/row balancing; it is not an optimal
+stratified group splitter. Fuzzy similarity is not used as an automatic
+contamination trigger.
+
+Optional train-only imputation supports mean, median, mode, constant, and
+leave-missing. It requires a split, preview token and explicit confirmation;
+fitting uses only training rows, configured target/entity/comparison/time/
+split columns are protected, and the output is a separately verified CSV.
+The uploaded original remains unchanged.
+
+Fresh automated checks on 2026-11-04: backend **301 passed, 1 skipped, 244
+warnings** in a disposable source copy; frontend **95 passed**; TypeScript and
+Python compilation passed; production build passed with 2,282 modules.
+Warnings include existing Python dependency/deprecation and pandas parsing
+warnings, plus the Node/Vite version, `__dirname` config-loader and bundle-size
+advisories. No browser E2E or real supplied-dataset run was performed. The
+prior dataset and production-scale performance remain NOT VERIFIED; no
+database schema or migration change was made.
+
+## Post-remediation verification update (2026-11-05)
+
+Remediation verification now maps output rows to identities anchored to the
+source file SHA-256 and original row position. Exact-duplicate keep-first
+verification requires the canonical source row to survive. Contamination
+retention verifies the actual retained source row and requested partition;
+quarantine verifies evidence rows in the separate quarantine artifact.
+Selected-finding failures cannot be masked by a zero-count aggregate detector.
+Chronological rebuilding is rejected at preview when it would move a
+contamination-retained row to a different partition. A finding is resolved
+only after its postcondition and artifact-integrity checks pass.
+
+No API or database migration was added. Latest automated verification:
+backend **307 passed, 1 skipped**; frontend **95 passed**; TypeScript/lint
+passed; production build passed. The build has existing Node/Vite and bundle
+warnings. Browser E2E and the provided failed-operation files were not
+available; do not infer live browser verification from these tests. See
+`DataLeakGuard-CV_E2E_TEST_REPORT.md` for exact commands and limitations.
+
+### Contamination verification and excluded evidence features (2026-11-05)
+
+The consolidated-remediation verifier now supports a confirmed model-input
+feature exclusion when that feature was also among a contamination finding's
+comparison fields. It validates the finding hash against immutable source
+rows and proves the requested retained partition/copy policy through stable
+source-row identities and the verified output projection. If matching fields
+remain in the output, they are rechecked there. The verification basis is
+persisted; a finding is not resolved if identity, partition, transformation,
+or artifact-integrity checks fail.
+
+Preview continues to reject incompatible chronological split and retained
+partition constraints. An arbitrary-column API regression reproduced and
+fixed the zero-global-groups/failed-selected-finding mismatch. Fresh checks:
+focused remediation **20 passed**; backend **307 passed, 1 skipped**; frontend
+**95 passed**; TypeScript/lint/build passed; `git diff --check` passed. The
+uploaded operation files were unavailable and browser verification remains
+NOT VERIFIED; these tests do not prove the exact stored evidence or live UI
+workflow.
+
+## Dataset profiles, partition comparisons, and persisted reports (2026-11-05)
+
+Tabular uploads now persist bounded schema-independent profiles, including
+row/column counts, duplicate and missing-cell counts, per-column numeric
+statistics, categorical frequencies, and parseable date ranges. The Dataset
+Detail page exposes searchable/paginated feature profiles and a
+source-integrity-checked refresh action.
+
+Partition Distribution Analysis is available at `/distribution-analysis`.
+It compares two explicitly selected labels from the persisted split
+configuration, reports numeric, categorical, and configured target/class
+metrics, and presents distribution differences as descriptive rather than
+proof of leakage. A changed or missing source file invalidates profile refresh
+and persisted profile/distribution retrieval.
+
+Reports snapshot available persisted profiling, detector configuration and
+findings, partition comparisons, remediation operations, verification, and
+unresolved/skipped analyses. Existing authenticated report APIs provide
+owner-scoped JSON, HTML, PDF, and flattened CSV downloads. Sections without
+persisted results are marked not performed; model training and performance
+evaluation are not generated by this workflow. If the registered source file
+fails SHA-256 verification, report sections derived from that source are marked
+stale instead of being presented as current.
+
+Principal APIs:
+
+- `GET/POST /api/v1/datasets/{dataset_id}/profiling`
+- `GET/POST /api/v1/datasets/{dataset_id}/distribution-analysis`
+- `POST/GET /api/v1/reports`, `GET /api/v1/reports/{report_id}`, and
+  `GET /api/v1/reports/{report_id}/download?format=json|html|pdf|csv`
+
+Detailed categories and distribution displays are bounded. Statistical tests
+and shift metrics are approximate/descriptive, and pandas profiling currently
+loads the supported tabular file into memory. Automated browser E2E and
+production-scale performance remain unverified.

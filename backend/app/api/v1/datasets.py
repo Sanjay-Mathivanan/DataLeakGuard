@@ -12,7 +12,12 @@ from app.core.config import settings
 from app.schemas import leakage
 from app.schemas.findings import DatasetFindingPage, FindingCounts
 from app.schemas.column_recommendations import ColumnRecommendationsResponse
+from app.schemas.profiling import DatasetProfilingRead
 from app.schemas.split_strategy import SplitGenerationRequest, SplitGenerationResponse
+from app.services.profiling_service import (
+    build_dataset_column_metadata,
+    profile_tabular_file,
+)
 from app.services.leakage_detection_service import detect_exact_duplicates, detect_entity_overlap, detect_target_leakage, detect_temporal_leakage, detect_train_test_contamination
 from app.services.column_recommendation_service import recommend_columns
 from app.services.split_strategy_service import (
@@ -141,6 +146,138 @@ def get_dataset_profile(
     if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
     return dataset
+
+
+def _get_owned_tabular_dataset(
+    dataset_id: str,
+    db: Session,
+    user: models.User,
+) -> models.Dataset:
+    dataset = db.query(models.Dataset).filter(
+        models.Dataset.id == dataset_id,
+        models.Dataset.owner_user_id == user.id,
+    ).first()
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    if dataset.type != "tabular" or (dataset.format or "").upper() not in {"CSV", "XLSX"}:
+        raise HTTPException(
+            status_code=422,
+            detail="Detailed profiling is supported for tabular CSV/XLSX datasets only",
+        )
+    return dataset
+
+
+def _detailed_profile_view(profile: dict) -> dict:
+    """Return the detailed profiler fields without analysis/configuration metadata."""
+    keys = {
+        "dataset_name",
+        "row_count",
+        "column_count",
+        "file_format",
+        "file_size_bytes",
+        "memory_usage_bytes",
+        "duplicate_row_count",
+        "total_missing_values",
+        "data_quality",
+        "columns",
+        "dtypes",
+        "column_profiles",
+        "category_value_limit",
+        "profiled_at",
+    }
+    return {key: profile[key] for key in keys if key in profile}
+
+
+def _profiling_response(dataset: models.Dataset) -> DatasetProfilingRead:
+    profile = dataset.profile if isinstance(dataset.profile, dict) else {}
+    detailed = _detailed_profile_view(profile)
+    return DatasetProfilingRead(
+        dataset_id=dataset.id,
+        dataset_name=dataset.name,
+        source_file_sha256=dataset.file_sha256 or "",
+        generated_at=str(detailed.get("profiled_at") or ""),
+        profile=detailed,
+    )
+
+
+@router.get(
+    "/datasets/{dataset_id}/profiling",
+    response_model=DatasetProfilingRead,
+    tags=["profiling"],
+)
+def get_detailed_dataset_profiling(
+    dataset_id: str,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
+    """Retrieve the last persisted detailed profile for an owned tabular dataset."""
+    dataset = _get_owned_tabular_dataset(dataset_id, db, user)
+    if not dataset_service.verify_dataset_integrity(dataset):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The stored source file is missing or no longer matches its registered SHA-256.",
+        )
+    profile = dataset.profile if isinstance(dataset.profile, dict) else {}
+    if not isinstance(profile.get("column_profiles"), list):
+        raise HTTPException(
+            status_code=404,
+            detail="No detailed profile is available; run POST /profiling to generate one.",
+        )
+    return _profiling_response(dataset)
+
+
+@router.post(
+    "/datasets/{dataset_id}/profiling",
+    response_model=DatasetProfilingRead,
+    status_code=status.HTTP_201_CREATED,
+    tags=["profiling"],
+)
+def refresh_detailed_dataset_profiling(
+    dataset_id: str,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
+    """Recompute and persist a detailed profile from the immutable uploaded file."""
+    dataset = _get_owned_tabular_dataset(dataset_id, db, user)
+    if not dataset_service.verify_dataset_integrity(dataset):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The stored source file is missing or no longer matches its registered SHA-256.",
+        )
+    try:
+        source_path = dataset_service.get_dataset_file_path(dataset)
+        detailed = profile_tabular_file(source_path, dataset_name=dataset.name)
+        previous = dict(dataset.profile or {})
+        previous.update(detailed)
+        dataset.profile = previous
+        dataset.sample_count = detailed["row_count"]
+        dataset.feature_count = detailed["column_count"]
+        dataset.columns = build_dataset_column_metadata(detailed)
+        db.add(dataset)
+        db.commit()
+        db.refresh(dataset)
+    except (FileNotFoundError, OSError, ValueError) as exc:
+        db.rollback()
+        raise HTTPException(status_code=422, detail=f"Could not profile the source dataset: {exc}") from exc
+
+    record_user_event(
+        db,
+        user_id=user.id,
+        dataset_id=dataset.id,
+        event_type="dataset_profiling",
+        outcome="completed",
+        title="Dataset profiling completed",
+        message=f"A detailed profile was generated for {dataset.name}.",
+        details={
+            "row_count": detailed["row_count"],
+            "column_count": detailed["column_count"],
+            "duplicate_row_count": detailed["duplicate_row_count"],
+            "total_missing_values": detailed["total_missing_values"],
+            "source_file_sha256": dataset.file_sha256,
+        },
+        deduplication_key=f"dataset-profiling:{dataset.id}:{detailed['profiled_at']}",
+    )
+    return _profiling_response(dataset)
 
 
 @router.get("/datasets", response_model=List[schemas.DatasetInDB])
@@ -281,9 +418,13 @@ def generate_dataset_split(
 def analyze_leakage(
     dataset_id: str,
     entity_column: Optional[str] = None,
+    entity_columns: Optional[List[str]] = Query(default=None),
+    contamination_key_columns: Optional[List[str]] = Query(default=None),
     split_column: Optional[str] = None,
     target_column: Optional[str] = None,
     time_column: Optional[str] = None,
+    temporal_objective: Optional[Literal["future_prediction", "randomized_holdout"]] = None,
+    configuration_confirmed: bool = False,
     split_strategy: Optional[Literal["existing", "generated", "none"]] = None,
     split_operation_id: Optional[str] = None,
     db: Session = Depends(get_db),
@@ -313,15 +454,62 @@ def analyze_leakage(
         raise HTTPException(status_code=404, detail="Dataset not found")
 
     try:
+        if temporal_objective is not None and time_column is None:
+            raise HTTPException(
+                status_code=422,
+                detail="temporal_objective requires time_column",
+            )
+        resolved_temporal_objective = temporal_objective or "future_prediction"
+        configured_contamination_keys: list[str] = []
+        if contamination_key_columns is not None:
+            configured_contamination_keys = [
+                column.strip()
+                for column in contamination_key_columns
+                if isinstance(column, str) and column.strip()
+            ]
+            if (
+                not configured_contamination_keys
+                or len(configured_contamination_keys) != len(contamination_key_columns)
+                or len(set(configured_contamination_keys))
+                != len(configured_contamination_keys)
+            ):
+                raise HTTPException(
+                    status_code=422,
+                    detail="contamination_key_columns must contain unique, non-empty names",
+                )
+        if entity_column is not None and entity_columns is not None:
+            raise HTTPException(
+                status_code=422,
+                detail="Provide entity_column or entity_columns, not both",
+            )
+        configured_entity_columns: list[str] = []
+        if entity_columns is not None:
+            configured_entity_columns = [
+                column.strip()
+                for column in entity_columns
+                if isinstance(column, str) and column.strip()
+            ]
+            if (
+                not configured_entity_columns
+                or len(configured_entity_columns) != len(entity_columns)
+                or len(set(configured_entity_columns)) != len(configured_entity_columns)
+            ):
+                raise HTTPException(
+                    status_code=422,
+                    detail="entity_columns must contain unique, non-empty column names",
+                )
+        elif entity_column is not None:
+            configured_entity_columns = [entity_column]
+
         legacy_split_request = split_strategy is None
         if (
             legacy_split_request
             and split_column is None
-            and (entity_column is not None or time_column is not None)
+            and (configured_entity_columns or time_column is not None)
         ):
-            if entity_column is not None and time_column is None:
+            if configured_entity_columns and time_column is None:
                 detail = "Both entity_column and split_column must be provided"
-            elif time_column is not None and entity_column is None:
+            elif time_column is not None and not configured_entity_columns:
                 detail = (
                     "Both time_column and split_column must be provided for "
                     "temporal leakage detection"
@@ -416,6 +604,43 @@ def analyze_leakage(
                 "requiring split membership were not evaluated."
             )
 
+        invalid_contamination_keys = [
+            column
+            for column in configured_contamination_keys
+            if column not in analysis_frame.columns or column == effective_split_column
+        ]
+        if invalid_contamination_keys:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Contamination comparison key columns must exist and cannot "
+                    "be the split column: "
+                    + ", ".join(invalid_contamination_keys)
+                ),
+            )
+        if target_column is not None and target_column not in analysis_frame.columns:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Target column '{target_column}' not found in dataset columns",
+            )
+        if time_column is not None and time_column not in analysis_frame.columns:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Time column '{time_column}' not found in dataset columns",
+            )
+        invalid_entity_columns = [
+            column for column in configured_entity_columns
+            if column not in analysis_frame.columns
+        ]
+        if invalid_entity_columns:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Entity column(s) not found in dataset columns: "
+                    + ", ".join(invalid_entity_columns)
+                ),
+            )
+
         # Entity and temporal checks are split-dependent. In explicit no-split
         # mode, keep independent checks running and disclose the skipped ones.
         if effective_split_column is None:
@@ -426,6 +651,12 @@ def analyze_leakage(
             ]
         else:
             skipped_detectors = []
+        if (
+            effective_split_column is not None
+            and time_column is not None
+            and resolved_temporal_objective == "randomized_holdout"
+        ):
+            skipped_detectors.append("temporal_leakage")
 
         # Reuse the selected frame so the detectors do not reread the entire
         # dataset separately. The source file remains untouched.
@@ -446,7 +677,11 @@ def analyze_leakage(
             )
             result["findings"] = findings
 
-        if time_column is not None and effective_split_column is not None:
+        if (
+            time_column is not None
+            and effective_split_column is not None
+            and resolved_temporal_objective == "future_prediction"
+        ):
             findings.extend(
                 detect_temporal_leakage(
                     dataset_id,
@@ -458,12 +693,16 @@ def analyze_leakage(
             )
             result["findings"] = findings
 
-        if entity_column is not None and effective_split_column is not None:
+        if configured_entity_columns and effective_split_column is not None:
             findings.extend(
                 detect_entity_overlap(
                     dataset_id,
                     db,
-                    entity_column,
+                    (
+                        configured_entity_columns[0]
+                        if len(configured_entity_columns) == 1
+                        else configured_entity_columns
+                    ),
                     effective_split_column,
                     analysis_frame=analysis_frame,
                 )
@@ -477,6 +716,7 @@ def analyze_leakage(
                     db,
                     effective_split_column,
                     analysis_frame=analysis_frame,
+                    matching_columns=configured_contamination_keys,
                 )
             )
             result["findings"] = findings
@@ -508,10 +748,20 @@ def analyze_leakage(
             profile.pop("split_column", None)
             profile.pop("split_row_counts", None)
         profile["analysis_columns"] = {
-            "entity_column": entity_column,
+            "configuration_confirmed": configuration_confirmed,
+            "entity_column": (
+                configured_entity_columns[0]
+                if len(configured_entity_columns) == 1
+                else None
+            ),
+            "entity_columns": configured_entity_columns,
+            "contamination_key_columns": configured_contamination_keys,
             "split_column": effective_split_column,
             "target_column": target_column,
             "time_column": time_column,
+            "temporal_objective": (
+                resolved_temporal_objective if time_column is not None else None
+            ),
         }
         profile["split_strategy"] = split_configuration
         dataset.profile = profile
@@ -520,6 +770,183 @@ def analyze_leakage(
         db.add(dataset)
         db.commit()
         result_findings = result.get("findings", [])
+
+        def missing_column_count(column: str | None) -> int:
+            if not column or column not in analysis_frame.columns:
+                return 0
+            values = analysis_frame[column]
+            text = values.astype("string").str.strip()
+            return int((values.isna() | text.eq("").fillna(False)).sum())
+
+        target_missing_rows = missing_column_count(target_column)
+        entity_missing_rows = (
+            int(
+                analysis_frame[configured_entity_columns]
+                .apply(
+                    lambda series: (
+                        series.isna()
+                        | series.astype("string").str.strip().eq("").fillna(False)
+                    )
+                )
+                .any(axis=1)
+                .sum()
+            )
+            if configured_entity_columns
+            else 0
+        )
+        invalid_timestamp_rows = (
+            int(
+                pd.to_datetime(
+                    analysis_frame[time_column], errors="coerce", utc=True
+                ).isna().sum()
+            )
+            if time_column and time_column in analysis_frame.columns
+            else 0
+        )
+        missing_split_rows = missing_column_count(effective_split_column)
+        contamination_missing_key_rows = (
+            int(
+                analysis_frame[configured_contamination_keys]
+                .apply(
+                    lambda series: (
+                        series.isna()
+                        | series.astype("string").str.strip().eq("").fillna(False)
+                    )
+                )
+                .any(axis=1)
+                .sum()
+            )
+            if configured_contamination_keys
+            else 0
+        )
+        contamination_matching_fields = (
+            configured_contamination_keys
+            if configured_contamination_keys
+            else [
+                column
+                for column in analysis_frame.columns
+                if column != effective_split_column and column.lower() != "id"
+            ]
+        )
+        detector_applicability = {
+            "entity_overlap": (
+                {
+                    "status": (
+                        "review_required"
+                        if entity_missing_rows or missing_split_rows
+                        else "evaluated"
+                    ),
+                    "entity_columns": configured_entity_columns,
+                    "missing_entity_key_rows": entity_missing_rows,
+                    "missing_split_membership_rows": missing_split_rows,
+                    "reason": (
+                        "Rows with incomplete entity keys or split membership were excluded from grouping."
+                        if entity_missing_rows or missing_split_rows
+                        else None
+                    ),
+                }
+                if configured_entity_columns and effective_split_column is not None
+                else {
+                    "status": "skipped" if effective_split_column is None else "requires_configuration",
+                    "reason": (
+                        "No split strategy is available."
+                        if effective_split_column is None
+                        else "Select one or more entity columns; no identifier is assumed."
+                    ),
+                }
+            ),
+            "target_leakage": (
+                {
+                    "status": "review_required" if target_missing_rows else "evaluated",
+                    "target_column": target_column,
+                    "missing_target_rows": target_missing_rows,
+                    "reason": (
+                        "Rows with missing target values were excluded from target-dependent checks."
+                        if target_missing_rows
+                        else None
+                    ),
+                }
+                if target_column
+                else {"status": "requires_configuration", "reason": "Select a target column."}
+            ),
+            "temporal_leakage": (
+                {
+                    "status": (
+                        "review_required"
+                        if invalid_timestamp_rows or missing_split_rows
+                        else "evaluated"
+                    ),
+                    "time_column": time_column,
+                    "split_column": effective_split_column,
+                    "invalid_or_missing_timestamp_rows": invalid_timestamp_rows,
+                    "missing_split_membership_rows": missing_split_rows,
+                    "timestamp_timezone_normalization": "UTC",
+                    "reason": (
+                        "Invalid timestamps or missing split assignments were excluded from chronology checks."
+                        if invalid_timestamp_rows or missing_split_rows
+                        else None
+                    ),
+                }
+                if (
+                    time_column
+                    and effective_split_column is not None
+                    and resolved_temporal_objective == "future_prediction"
+                )
+                else {
+                    "status": (
+                        "skipped"
+                        if effective_split_column is None
+                        or (
+                            time_column
+                            and resolved_temporal_objective == "randomized_holdout"
+                        )
+                        else "requires_configuration"
+                    ),
+                    "reason": (
+                        "No split strategy is available."
+                        if effective_split_column is None
+                        else (
+                            "Temporal range overlap is not interpreted as leakage for a randomized-holdout objective."
+                            if time_column
+                            and resolved_temporal_objective == "randomized_holdout"
+                            else "Select a timestamp column to evaluate chronology."
+                        )
+                    ),
+                }
+            ),
+            "train_test_contamination": (
+                {
+                    "status": (
+                        "requires_configuration"
+                        if not contamination_matching_fields
+                        else "review_required"
+                        if missing_split_rows or contamination_missing_key_rows
+                        else "evaluated"
+                    ),
+                    "split_column": effective_split_column,
+                    "matching_fields": contamination_matching_fields,
+                    "matching_strategy": (
+                        "user_configured_key"
+                        if configured_contamination_keys
+                        else "exact_row_content"
+                    ),
+                    "missing_split_membership_rows": missing_split_rows,
+                    "missing_comparison_key_rows": contamination_missing_key_rows,
+                    "reason": (
+                        "Select a comparison key; no non-split fields remain for cross-partition comparison."
+                        if not contamination_matching_fields
+                        else "Rows with missing split membership or configured comparison-key components were excluded from cross-partition comparisons."
+                        if missing_split_rows or contamination_missing_key_rows
+                        else None
+                    ),
+                }
+                if effective_split_column is not None
+                else {
+                    "status": "skipped",
+                    "reason": "No split membership was selected or generated.",
+                }
+            ),
+        }
         record_user_event(
             db,
             user_id=user.id,
@@ -533,6 +960,7 @@ def analyze_leakage(
                 "columns": profile["analysis_columns"],
                 "split_strategy": split_configuration,
                 "skipped_detectors": skipped_detectors,
+                "detector_applicability": detector_applicability,
             },
             deduplication_key=f"analysis:{dataset.id}:{uuid.uuid4()}",
         )
@@ -540,6 +968,8 @@ def analyze_leakage(
         result["split_configuration"] = split_configuration
         result["skipped_detectors"] = skipped_detectors
         result["split_explanation"] = split_explanation
+        result["analysis_configuration"] = profile["analysis_columns"]
+        result["detector_applicability"] = detector_applicability
         return result
     except Exception:
         _mark_analysis_failed(db, dataset_id, user.id)

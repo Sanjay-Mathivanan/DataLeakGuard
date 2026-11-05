@@ -703,3 +703,405 @@ Remediation Center / Analysis Setup task — final implementation snapshot
   dataset/account; verify output bytes/hashes, every remediation policy and
   Analysis Setup-to-Analysis handoff. Do not mark browser workflows PASS
   until actually exercised.
+
+Remediation/data-leakage maintenance — baseline and source review
+(2026-11-04)
+
+Required project documents read before source edits:
+- `CODEX_PROJECT_INSTRUCTIONS.txt` (existing untracked file; its useful rules
+  were preserved and augmented with the permanent rules from the current
+  prompt).
+- This working context, `DataLeakGuard-CV_IMPLEMENTATION_REPORT.md`,
+  `DataLeakGuard-CV_PROJECT_MASTER_CONTEXT.md`,
+  `DataLeakGuard-CV_E2E_TEST_REPORT.md`,
+  `DataLeakGuard-CV_Audit_Report.md`, and `README.md`.
+
+Git baseline:
+- The earlier note in this section stating that only
+  `CODEX_PROJECT_INSTRUCTIONS.txt` was untracked and tracked diffs were empty
+  was stale for the resumed implementation state. At continuation, the actual
+  `git status --short --untracked-files=all` showed numerous modified backend,
+  frontend, test and working-context files plus untracked preprocessing
+  modules/tests and `src/components/remediation/`; no staged paths were shown.
+  These in-progress changes were preserved and reviewed; they were not reset,
+  cleaned or staged.
+- No project database, project storage, supplied data, or credentials were
+  read or changed.
+
+Architecture/source paths inspected:
+- FastAPI route registration and owner-scoped routes: `backend/app/main.py`,
+  `backend/app/api/v1/datasets.py`, `backend/app/api/v1/remediation.py`.
+- Persisted entities: `backend/app/db/models.py`,
+  `backend/app/db/leakage_models.py`. Dataset `profile` is JSON and
+  `RepairRecord.operation_metadata`/`AuditEvent.details` already persist
+  workflow context; no schema migration is currently needed.
+- Detection/remediation: `backend/app/services/leakage_detection_service.py`,
+  `backend/app/services/remediation_service.py`,
+  `backend/app/services/split_strategy_service.py`,
+  `backend/app/services/evidence_service.py`.
+- Frontend setup/result/remediation flows:
+  `src/pages/AnalysisSetupPage.tsx`, `src/pages/AnalysisPage.tsx`,
+  `src/pages/RemediationCenterPage.tsx`, `src/services/api.ts`,
+  `src/types/index.ts`.
+- Test safety: `backend/tests/conftest.py` patches database and storage to
+  per-test temporary locations. The complete baseline nevertheless ran from
+  a disposable source-only copy to ensure the project database/storage could
+  not be reached.
+
+Fresh pre-change baseline (2026-11-04):
+- Disposable backend source copy:
+  `C:\Users\sanja\AppData\Local\Temp\DataLeakGuard-CV-remediation-fix-baseline-20261104\backend`.
+  `rtk proxy python -m pytest tests -q -p no:cacheprovider` — **277 passed,
+  1 skipped, 219 warnings**, exit 0 (119.72 seconds).
+- Frontend `rtk proxy npm test` — **86 passed, 0 failed, 0 skipped**, exit 0.
+- `rtk proxy npm run lint` (`tsc --noEmit`) — exit 0.
+- Existing warnings include SQLAlchemy/Pydantic/httpx deprecations,
+  optional-PyArrow warning, and the pandas date-inference warning in the
+  temporal detector test. A production build has not yet been run for this
+  maintenance task.
+
+Source-confirmed discrepancy/root-cause findings:
+- Analysis Setup stores confirmed selections in dataset-keyed session storage.
+  The analysis request sends `entity_column`; `datasets.py` validates and
+  persists `profile["analysis_columns"]` and writes the same columns plus split
+  strategy to the analysis audit event. The current analysis path therefore
+  can persist a selected `sensor_id`.
+- The Remediation Center initializes `actionConfigurations` to `{}` and does
+  not hydrate its action selectors from `dataset.profile.analysisColumns`.
+  Non-duplicate actions default to `review_only`. The backend plan only has
+  action-local configuration, and the manifest omits a top-level snapshot of
+  the last confirmed analysis columns. Thus a prior analysis selection is
+  not propagated into the remediation controls/manifest; this explains a
+  missing `entity_column` when the entity action was not separately
+  configured. The backend rejects missing entity/split inputs for a requested
+  group-split action rather than silently substituting `event_id`.
+- The current remediation engine has deterministic group-aware assignment,
+  explicit target-feature exclusion, explicit-cutoff chronological split,
+  and evidence-validated contamination exclusion/quarantine. Those actions
+  are not automatically chosen; defaults are intentionally `review_only`.
+  The task's reported `review_only`, empty exclusion list, and unapplied split
+  actions are consistent with previews that did not explicitly select those
+  transformations. A same output SHA-256 alone is not proof of failure; it
+  must be interpreted alongside selected/applied actions and verification.
+- The current group split rejects any missing entity IDs and uses seeded
+  entity ordering, but does not use target labels to approximate class
+  distribution. The chronological strategy rejects any missing/invalid
+  timestamp. These are safe but constrained behaviors to retain or improve
+  explicitly; do not impute or delete those rows silently.
+- The existing post-operation checks validate the selected duplicate groups,
+  configured entity/chronological outcomes, selected contamination row hashes,
+  schema/row counts and output round-trip. They do not currently include an
+  explicit whole-output/source-difference result, a full confirmed analysis
+  configuration snapshot, or imputation checks.
+- The detector already identifies exact target copies and deterministic
+  feature-to-target mappings. Findings are review signals, not causal claims.
+  No supplied 12,001-row sensor dataset was verified in this checkout; test
+  fixtures must remain synthetic and isolated.
+- Documentation has historical statements superseded by later addenda:
+  notably the README's early phase table/API paragraphs claim authentication
+  was absent and list only pre-Batch-2 remediation, while source contains
+  owner-scoped auth and the current remediation-plan APIs. The audit report's
+  October 2026 mocks/security statements are historical and not a fresh audit.
+
+Implementation plan for this maintenance:
+1. Keep existing confirmed analysis configuration available in the
+   Remediation Center; never guess or replace missing selections.
+2. Bind a validated analysis-configuration snapshot and explicit exclusion
+   reasons to remediation preview, verification response, and generated
+   manifest, and expose it in the UI.
+3. Improve group-aware splitting using the explicitly confirmed target when
+   available for deterministic approximate class/row balancing; preserve
+   entity groups, reject missing IDs clearly, and record the algorithm and
+   balance summary without exposing entity values.
+4. Strengthen output verification for expected transformations and record
+   source/output equality and before/after detector checks without treating
+   skipped checks as passed.
+5. Add isolated backend/frontend regression tests, then run full suites and a
+   production build outside the repository.
+6. Update all relevant reports with exact results and retain browser E2E as
+   NOT VERIFIED unless a real authenticated browser workflow is actually run.
+
+Remaining requirements requiring explicit completion or limitation review:
+- Optional train-only imputation is now implemented with preview, explicit
+  confirmation, persisted fitted values, a separate CSV output and
+  post-operation verification. XLSX imputation is not supported by this API.
+- Browser verification, the previous real dataset, production-scale
+  performance, background execution and multi-worker behavior remain
+  unverified.
+- Continue to preserve all in-progress source/docs and user data; do not stage,
+  commit, reset, clean, migrate or delete anything.
+
+Generic leakage/remediation maintenance — final verified state (2026-11-04)
+
+Implementation carried forward and reviewed:
+- `datasets.py` accepts validated arbitrary `entity_column`/repeated
+  `entity_columns`, contamination comparison keys, target, timestamp, split,
+  temporal objective and confirmation state. It persists the configuration
+  in dataset profile and audit details and returns explicit detector
+  applicability.
+- `leakage_detection_service.py` supports composite entity evidence,
+  exact/configured-key contamination evidence, target exact/reversible/
+  suspected deterministic mapping classifications, UTC timestamp parsing and
+  row/partition references. Missing configured values are not counted as
+  clean detector outcomes.
+- `remediation_service.py` uses validated persisted configuration snapshots
+  in preview, execution, verification and manifest. Deterministic seeded
+  group splitting keeps all rows for an entity key together and uses a
+  documented greedy approximation for row/target-class balance. The verifier
+  reopens actual outputs, records before/after results and distinct
+  passed/failed/skipped/review-required states, and resolves findings only
+  after matching verified postconditions.
+- New preprocessing schemas, API router and service expose preview/execute
+  for mean/median/mode/constant/leave-missing. Fitting is training-partition
+  only. Configured target/entity/comparison/time/split columns are protected;
+  a distinct CSV output, source/output hashes and round-trip/missing-count
+  checks are persisted.
+- Analysis Setup and Remediation Center carry configuration through typed
+  frontend APIs. The imputation panel now also visibly protects configured
+  contamination comparison keys.
+- A 6,224-row generic-schema regression fixture was added to ensure the
+  composite entity detector works beyond small sample fixtures.
+
+API additions/changes:
+- `POST /api/v1/datasets/{dataset_id}/analyze/leakage` accepts repeated
+  `entity_columns` and `contamination_key_columns`, `temporal_objective` and
+  `configuration_confirmed`; configuration and applicability are returned and
+  persisted.
+- `POST /api/v1/datasets/{dataset_id}/preprocessing/imputation/preview`
+- `POST /api/v1/datasets/{dataset_id}/preprocessing/imputation/execute`
+- Existing operation download recognizes `train_only_imputation`.
+- No SQLAlchemy model, database column, or migration change.
+
+Final verification (fresh, 2026-11-04):
+- Backend isolated copy
+  `C:\Users\sanja\AppData\Local\Temp\DLCV-generic-final-review-y0u7qsdq\backend`:
+  `rtk proxy python -m pytest tests -q -p no:cacheprovider` — **301 passed,
+  1 skipped, 244 warnings**, exit 0 (80.85s). Copy excludes project DB and
+  storage; fixtures use disposable SQLite/temp storage.
+- Same copy: `rtk proxy python -m compileall -q app tests` — passed.
+- Frontend: `rtk proxy npm test` — **95 passed, 0 failed, 0 skipped**.
+- Frontend: `rtk proxy npm run lint` (`tsc --noEmit`) — passed.
+- Production build:
+  `rtk proxy npm run build -- --outDir C:\Users\sanja\AppData\Local\Temp\DLCV-generic-final-build-20261104-r2`
+  — passed, 2,282 modules. First restricted invocation failed because Node
+  could not `lstat C:\Users\sanja`; the same command passed after filesystem
+  permission was approved. Existing warnings: Node v20.13.1 below Vite's
+  minimum, Vite `__dirname` config-loader warning, external temp outDir
+  notice, and 949.90 kB JS chunk advisory.
+
+Documentation updated after verification:
+- `CODEX_PROJECT_INSTRUCTIONS.txt` (corrected malformed heading; retained
+  permanent rules).
+- `DataLeakGuard-CV_WORKING_CONTEXT.txt`
+- `DataLeakGuard-CV_IMPLEMENTATION_REPORT.md`
+- `DataLeakGuard-CV_PROJECT_MASTER_CONTEXT.md`
+- `DataLeakGuard-CV_E2E_TEST_REPORT.md`
+- `DataLeakGuard-CV_Audit_Report.md`
+- `README.md`
+
+Limitations:
+- No browser E2E, supplied previous real dataset, authenticated live workflow,
+  or direct browser-download flow was tested.
+- Similarity-based contamination is not auto-detected; only exact row content
+  or explicitly configured exact comparison-key matching is used.
+- Group split is a deterministic heuristic, not optimal stratification.
+- Train-only imputation API writes CSV only; XLSX imputation is unsupported.
+- Dataset processing remains synchronous/dataframe-based; production-scale
+  memory/latency, background jobs, multi-worker concurrency and deployment
+  security are unverified.
+- No project database/storage was opened or modified; no migration, stage,
+  commit, reset, clean or delete was performed.
+
+Post-remediation verification consistency fix — final verified state
+(2026-11-05)
+
+Root-cause result:
+- The user-provided failed-operation manifest/report were not present in this
+  checkout. Source inspection and regression reproduction confirmed that
+  detector-wide “zero remaining groups” and selected-finding verification
+  lacked a shared, enforceable source-row identity contract.
+- Exact duplicate verification must prove the canonical keep-first row
+  survives. Removing a group entirely is not a repair.
+- Contamination verification must prove the explicitly retained source row
+  survives in the requested partition and evidenced conflicting copies are
+  absent (or the exact source rows are present in quarantine). An empty match
+  set is not success.
+- A chronological split must preserve contamination retention constraints;
+  preview rejects an incompatible cutoff before execution.
+
+Implementation:
+- `backend/app/services/remediation_service.py` now builds a stable identity
+  from source SHA-256 plus zero-based source row position, carries output and
+  quarantine row-position maps, verifies the expected transformed source
+  projection against the CSV readback, and validates identity digests.
+- Per-finding postconditions are recorded separately from aggregate detector
+  results. If a selected finding or required output integrity check fails,
+  that finding is not resolved and its aggregate detector is downgraded to
+  `review_required`, even if a global scan finds zero groups.
+- Duplicate, contamination, entity, target, temporal and quarantine
+  verification use per-finding checks. Reports/manifests expose the verified
+  IDs, finding statuses, detector states and artifact checks. No API endpoint,
+  request/response schema, DB model or migration changed.
+
+Regression additions in `backend/tests/test_remediation_plans.py` use
+arbitrary column names and temporary fixtures for combined duplicate/
+contamination/target/chronological transformations, a missing canonical row,
+a missing retained contamination row, chronology-retention conflict
+rejection, and report/manifest consistency after forced identity failure.
+
+Verified results (2026-11-05):
+- Focused backend remediation tests: `rtk proxy python -m pytest
+  tests/test_remediation_plans.py -q` — 19 passed.
+- Full backend suite with `DATABASE_URL` directed to
+  `C:\Users\sanja\AppData\Local\Temp\dlcv-verification-fix-20261105-r2.sqlite`:
+  307 passed, 1 skipped, 247 warnings (134.34s). Per-test fixtures also use
+  temporary SQLite and storage.
+- Frontend `rtk proxy npm test`: 95 passed, 0 failed, 0 skipped.
+- `rtk proxy npm run lint` (`tsc --noEmit`): passed.
+- Production build passed to
+  `C:\Users\sanja\AppData\Local\Temp\dlcv-postremediation-build-20261105`
+  after an in-sandbox Node `EPERM` and approved filesystem-access retry.
+- No browser test was performed. The supplied failed-operation artifacts,
+  authenticated browser workflow and downloaded-output UI remain NOT VERIFIED.
+- Existing warnings include Python dependency deprecations, optional PyArrow,
+  pandas date parsing, Node 20.13.1 below Vite's required version, Vite's
+  `__dirname` config warning and the large JS bundle advisory.
+- No project DB/storage was read or modified. No stage, commit, push, reset,
+  clean, schema migration or unrelated cleanup was performed.
+
+Task files directly changed for this bug fix:
+- `backend/app/services/remediation_service.py`
+- `backend/tests/test_remediation_plans.py`
+- This working context and the implementation, master-context, E2E, audit and
+  README documents were appended with this verified maintenance addendum.
+- `CODEX_PROJECT_INSTRUCTIONS.txt` was reviewed and remains unchanged because
+  its permanent rules still apply.
+
+Consolidated remediation contamination-verification follow-up — 2026-11-05
+
+Documents read before source review:
+- `CODEX_PROJECT_INSTRUCTIONS.txt`
+- `DataLeakGuard-CV_IMPLEMENTATION_REPORT.md`
+- `DataLeakGuard-CV_PROJECT_MASTER_CONTEXT.md`
+- `DataLeakGuard-CV_E2E_TEST_REPORT.md`
+- `DataLeakGuard-CV_Audit_Report.md`
+- `README.md`
+- This working context.
+
+Baseline/safety:
+- The repository was already extensively dirty, including all six project
+  reports, remediation service/tests, frontend work, generated bytecode and
+  `backend/test.db`. All were preserved. No stage, commit, push, reset, clean,
+  migration, production DB operation, or source-data edit was performed.
+- The supplied failure manifest/report and named finding ID were not present
+  in the checkout (repository text search found no matching ID). The exact
+  persisted evidence therefore could not be independently inspected.
+- Backend tests used per-test temporary SQLite/storage and an explicit
+  `DATABASE_URL` under the Windows temp directory; bytecode writes were
+  disabled for test runs.
+
+Root cause proven by synthetic reproduction:
+- `_verify_plan` required every contamination `matching_fields` column to
+  exist in the output and rehashed output rows before applying the selected
+  row-identity policy. A confirmed target-feature exclusion can intentionally
+  remove one such field. When duplicate/contamination actions also remove the
+  conflicting source copy, the output detector can report zero groups while
+  the selected finding verifier incorrectly fails.
+- Before the code fix, the new API regression completed the operation with
+  `remaining_condition_count == 0`, but
+  `selected_contamination_groups_separated` was false. This is a reproducible
+  generic defect consistent with the reported symptom; the unavailable
+  original finding cannot be linked to the exact same `matching_fields`.
+
+Implementation:
+- `backend/app/services/remediation_service.py`: verify comparison hashes
+  against original source evidence, validate source identities and source
+  partition policy, and verify that retained identities survive while
+  explicitly excluded copies do not. When all evidence fields remain in the
+  output, their hash/partition state is rechecked. If fields were explicitly
+  excluded by the plan, use the immutable source-identity mapping plus the
+  independently verified output projection; persist the verification basis.
+  Missing fields not accounted for by the approved exclusion remain failure.
+- Split-conflict code was not changed: preview checks chronological assignments
+  against each selected contamination retained partition, rejecting conflict
+  before execution. Both transformations use original source positions;
+  compatible constraints remain accepted.
+- `backend/tests/test_remediation_plans.py`: added an end-to-end arbitrary
+  schema regression for a selected target-derived evidence feature excluded
+  alongside duplicate and contamination remediation; strengthened the
+  compatible chronological combination to include an excluded match field.
+  Existing controls cover retention-only, chronology-only, incompatible
+  cutoff rejection, missing retained rows/canonical duplicates, detector
+  zero with failed finding postcondition, operation report/manifest status,
+  and open-versus-resolved finding status.
+- No API, database model, schema, or migration changes.
+
+Fresh verification:
+- `DATABASE_URL=sqlite:///C:/Users/sanja/AppData/Local/Temp/dlcv-remediation-focused-final-r2-20261105.sqlite; PYTHONDONTWRITEBYTECODE=1; rtk proxy python -m pytest tests/test_remediation_plans.py -q -p no:cacheprovider` from `backend/`: **20 passed, 25 warnings**, 7.36s.
+- `DATABASE_URL=sqlite:///C:/Users/sanja/AppData/Local/Temp/dlcv-remediation-full-final-r2-20261105.sqlite; PYTHONDONTWRITEBYTECODE=1; rtk proxy python -m pytest tests -q -p no:cacheprovider` from `backend/`: **307 passed, 1 skipped, 248 warnings**, 83.43s.
+- `rtk proxy npm test`: **95 passed**.
+- `rtk proxy npm run lint`: passed (`tsc --noEmit`).
+- `rtk proxy npx tsc --noEmit`: passed.
+- Production Vite build to `C:\Users\sanja\AppData\Local\Temp\dlcv-contamination-build-20261105-r1`: passed, 2,282 modules. Initial restricted invocation failed with Node `EPERM` resolving `C:\Users\sanja`; approved retry passed.
+- `rtk proxy git diff --check`: exit 0, no whitespace errors.
+
+Warnings: existing Starlette/httpx, SQLAlchemy, Pydantic, PyArrow and pandas
+warnings; Node 20.13.1 is below Vite's minimum; existing `__dirname`
+config-loader advisory and roughly 950 kB JS chunk warning.
+
+Browser and exact-input status:
+- Browser E2E was not performed; the original operation artifacts remain
+  unavailable. Manual authenticated UI click-through, source hash inspection
+  against that exact dataset, and browser download verification remain
+  NOT VERIFIED.
+- All six reports were appended with this verified maintenance result;
+  `CODEX_PROJECT_INSTRUCTIONS.txt` was read and left unchanged.
+
+## Current milestone: profiles, partition distribution, reports (2026-11-05)
+
+Read the permanent Codex instructions and project documents before resuming;
+source code is authoritative. Existing earlier remediation work remains
+uncommitted and must be preserved.
+
+New/reviewed implementation:
+- `backend/app/services/profiling_service.py` produces generic detailed
+  numeric/categorical/datetime and quality summaries; category output is
+  bounded. Dataset upload stores detailed profile JSON and the profile API
+  can retrieve/refresh it only after source SHA-256 validation. Report
+  snapshots mark derived sections stale if the registered source fails
+  integrity verification.
+- `backend/app/services/partition_distribution_service.py` compares two
+  explicitly selected labels from the persisted split configuration. Results
+  and source hash are persisted in the existing AuditEvent JSON. Both
+  creation and retrieval require current source-file integrity.
+- Mixed datetime formats normalize to UTC; text columns need a 70% parseable
+  sample to be classified as datetime. Target/class status is `analyzed`;
+  metric status is separate as `distribution_status`.
+- Frontend Dataset Detail exposes feature profiles and comparison navigation.
+  `/distribution-analysis` renders actual numeric/categorical feature
+  comparisons and target/class distributions. Reports select an owned
+  dataset and expose persisted JSON/HTML/PDF/CSV artifacts.
+- No DB model, table, migration, uploaded file, or project database was
+  changed for this milestone. Distribution metrics are approximate and
+  descriptive; profiling loads tabular files in pandas memory.
+
+Verification on 2026-11-05:
+- Focused backend: **21 passed, 16 warnings**.
+- Full backend: **329 passed, 1 skipped, 257 warnings**, from a disposable
+  source copy with temporary SQLite and per-test storage/database fixtures.
+- Frontend: **100 passed, 0 failed, 0 skipped**.
+- `npm run lint` (`tsc --noEmit`): passed.
+- Production Vite build to
+  `C:\Users\sanja\AppData\Local\Temp\DLCV-profiling-reports-build-20261105-r2`:
+  passed, 2,283 modules. Warnings: Node 20.13.1 below Vite's minimum,
+  `__dirname` config-loader warning, and >500 kB main chunk.
+- No real browser E2E or real uploaded dataset run was performed. Manual
+  authenticated navigation, actual chart rendering and browser downloads
+  remain NOT VERIFIED.
+
+Manual verification: start existing backend/frontend, sign in, open a tabular
+dataset's Profile tab, inspect/refresh the real profile, open Partition
+Distribution Analysis via the dataset link, choose two observed split labels,
+run analysis, inspect target/class plus feature metrics, then generate and
+download a report in all formats. Use only a disposable dataset copy for any
+file-integrity mutation.

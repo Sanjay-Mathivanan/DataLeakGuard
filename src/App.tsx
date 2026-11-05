@@ -22,6 +22,7 @@ import { ImpactAnalysisPage } from './pages/ImpactAnalysisPage';
 import { ModelIntegrityPage } from './pages/ModelIntegrityPage';
 import { InferenceProvenancePage } from './pages/InferenceProvenancePage';
 import { DistributionShiftPage } from './pages/DistributionShiftPage';
+import { PartitionDistributionPage } from './pages/PartitionDistributionPage';
 import { ReportsPage } from './pages/ReportsPage';
 import { ReportDetailPage } from './pages/ReportDetailPage';
 import { AccountPage } from './pages/AccountPage';
@@ -92,6 +93,7 @@ export default function App() {
               <Route path="model-integrity" element={<ModelIntegrityPage />} />
               <Route path="inference-provenance" element={<InferenceProvenancePage />} />
               <Route path="distribution-shift" element={<DistributionShiftPage />} />
+              <Route path="distribution-analysis" element={<PartitionDistributionPage />} />
               <Route path="reports" element={<ReportsPage />} />
               <Route path="reports/:id" element={<ReportDetailPage />} />
               <Route path="account" element={<AccountPage />} />

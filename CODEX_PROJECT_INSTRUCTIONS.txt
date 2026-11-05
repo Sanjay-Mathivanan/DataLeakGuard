@@ -1,0 +1,171 @@
+DataLeakGuard-CV — Mandatory Project Context Instructions
+
+IMPORTANT: Follow these instructions before starting every new Codex task in this repository.
+
+## Permanent task rules
+
+1. Before every new task, read this file,
+   `DataLeakGuard-CV_WORKING_CONTEXT.txt`,
+   `DataLeakGuard-CV_IMPLEMENTATION_REPORT.md`,
+   `DataLeakGuard-CV_PROJECT_MASTER_CONTEXT.md`,
+   `DataLeakGuard-CV_E2E_TEST_REPORT.md`,
+   `DataLeakGuard-CV_Audit_Report.md`, and `README.md`.
+2. If a document has a different extension or location, locate and use the
+   existing corresponding document; do not create a duplicate just to match a
+   suggested path.
+3. Understand the architecture, implementation phases, features, APIs, models,
+   services, UI, tests, and limitations before changing source.
+4. Treat source code and reproducible tests as the authority for behavior.
+   Investigate and document discrepancies instead of silently choosing
+   between outdated documentation and code.
+5. Inspect Git status and existing diffs before editing. Preserve unrelated
+   work; never reset, clean, delete, overwrite, stage, commit, or push unrelated
+   user changes.
+6. Never modify the real project database or existing user data during tests.
+   Use isolated temporary databases and storage.
+7. Make incremental, minimal changes that reuse the existing architecture.
+8. Run relevant tests and report exact commands/results. Never fabricate a
+   result or claim an unverified capability.
+9. After each completed task, review all project documents and update the
+   relevant ones while preserving useful historical evidence.
+10. Clearly distinguish implemented, tested, passed, failed, skipped,
+    blocked, and manually unverified behavior.
+11. At task completion, report changed files, verification, limitations,
+    documentation updates, and practical manual testing instructions.
+12. Do not expose credentials, tokens, cookies, secrets, or sensitive dataset
+    rows in logs, tests, or reports.
+13. Follow the repository's `rtk` command-prefix instruction for shell
+    commands.
+
+## 1. Read project documentation first
+
+Before inspecting or modifying source code, read the latest versions of:
+
+1. `CODEX_PROJECT_INSTRUCTIONS.txt`
+2. `DataLeakGuard-CV_WORKING_CONTEXT.txt`
+3. `DataLeakGuard-CV_IMPLEMENTATION_REPORT.md`
+4. `DataLeakGuard-CV_PROJECT_MASTER_CONTEXT.md`
+5. `DataLeakGuard-CV_E2E_TEST_REPORT.md`
+6. `DataLeakGuard-CV_Audit_Report.md`
+7. `README.md`
+
+Also read CODEX_PROJECT_INSTRUCTIONS.txt.
+
+If a listed file has a different extension or location, locate the corresponding existing file. Do not create a replacement merely because the expected path differs.
+
+## 2. Understand before implementing
+
+Extract and understand:
+
+- Project objective and scope.
+- Existing architecture and technologies.
+- Completed implementation phases.
+- Existing backend APIs and services.
+- Existing frontend pages and components.
+- Database models and schemas.
+- Detection and remediation workflows.
+- Existing tests and their results.
+- Known bugs, warnings, limitations, and incomplete features.
+- Existing project conventions.
+
+Do not assume that a feature is missing merely because it is not mentioned in one document.
+
+## 3. Documentation has priority
+
+Use the project documentation and actual source code as the basis for every implementation decision.
+
+If documentation conflicts with the actual source code:
+
+- Investigate the difference.
+- Identify which information is outdated.
+- Do not silently assume either is correct.
+- Explain the discrepancy.
+- Update the affected documentation after verifying the actual implementation.
+
+Never invent completed functionality, test results, API behavior, or architecture.
+
+## 4. Preserve existing project work
+
+Before changing files:
+
+- Inspect Git status.
+- Inspect existing changes.
+- Identify related source files.
+- Understand existing dependencies.
+- Preserve unrelated user modifications.
+
+Do not reset, clean, delete, overwrite, stage, commit, or push unrelated work.
+
+Do not modify the real database while running tests.
+
+## 5. Implement incrementally
+
+For every task:
+
+1. Understand the request.
+2. Inspect relevant existing code.
+3. Identify the root cause.
+4. Prepare an implementation plan.
+5. Modify only necessary files.
+6. Add or update tests.
+7. Run relevant tests.
+8. Check backward compatibility.
+9. Inspect the final diff.
+10. Report exactly what changed.
+
+Do not replace working architecture unnecessarily.
+
+## 6. Testing and honesty
+
+Never claim that a feature works without appropriate verification.
+
+Clearly distinguish:
+
+- Implemented
+- Tested
+- Passed
+- Failed
+- Not tested
+- Blocked
+- Requires manual verification
+
+Report exact test counts and actual command results.
+
+Do not fabricate test results.
+
+## 7. Mandatory documentation maintenance
+
+After completing each implementation task:
+
+Review whether the following documents need updating:
+
+- DataLeakGuard-CV_IMPLEMENTATION_REPORT.md
+- DataLeakGuard-CV_PROJECT_MASTER_CONTEXT.md
+- DataLeakGuard-CV_E2E_TEST_REPORT.md
+- DataLeakGuard-CV_Audit_Report.md
+- README.md
+
+Update only documents affected by the completed task.
+
+Documentation updates must reflect actual code changes and verified test results.
+
+Do not overwrite historical information unnecessarily. Preserve previous implementation history and clearly identify new changes.
+
+If no update is required, explain why.
+
+## 8. Final response
+
+At the end of every task, report:
+
+1. Documentation read.
+2. Existing implementation understood.
+3. Root cause.
+4. Files modified and created.
+5. Backend changes.
+6. Frontend changes.
+7. Tests and exact results.
+8. Remaining issues.
+9. Documentation updated.
+10. Manual testing instructions.
+
+These instructions are mandatory for every new Codex task in this repository.

@@ -18,6 +18,9 @@ import {
   RemediationActionRequest,
   RemediationPlanPage,
   RemediationPlanRecord,
+  ImputationOperation,
+  ImputationPreview,
+  ImputationRequest,
   FindingOperationType,
   Model,
   InferenceRecord,
@@ -375,6 +378,61 @@ export async function getDatasetById(id: string): Promise<Dataset | null> {
   return toCamelCase(data);
 }
 
+export interface DatasetProfilingResult {
+  datasetId: string;
+  datasetName: string;
+  sourceFileSha256: string;
+  generatedAt: string;
+  profile: NonNullable<Dataset['profile']>;
+}
+
+function mapDatasetProfilingResult(raw: unknown): DatasetProfilingResult {
+  if (!isRecord(raw) || !isRecord(raw.profile)) {
+    throw new Error('Invalid dataset profiling response');
+  }
+  const mapped = toCamelCase(raw);
+  const rawProfile = raw.profile as Record<string, unknown>;
+  const profile = mapped.profile as NonNullable<Dataset['profile']>;
+  // `dtypes` is an object indexed by caller-provided column names; preserve
+  // those keys instead of applying API field-name conversion to them.
+  if (isRecord(rawProfile.dtypes)) {
+    (profile as Record<string, unknown>).dtypes = rawProfile.dtypes;
+  }
+  if (
+    typeof mapped.datasetId !== 'string' ||
+    typeof mapped.datasetName !== 'string' ||
+    typeof mapped.sourceFileSha256 !== 'string' ||
+    typeof mapped.generatedAt !== 'string' ||
+    !Array.isArray(profile.columnProfiles)
+  ) {
+    throw new Error('Invalid dataset profiling response fields');
+  }
+  return {
+    datasetId: mapped.datasetId,
+    datasetName: mapped.datasetName,
+    sourceFileSha256: mapped.sourceFileSha256,
+    generatedAt: mapped.generatedAt,
+    profile,
+  };
+}
+
+export async function getDatasetProfiling(datasetId: string): Promise<DatasetProfilingResult> {
+  const response = await apiFetch(
+    `${getApiBaseUrl()}/datasets/${encodeURIComponent(datasetId)}/profiling`
+  );
+  if (!response.ok) throw await readApiError(response, 'Could not load detailed dataset profiling');
+  return mapDatasetProfilingResult(await response.json());
+}
+
+export async function refreshDatasetProfiling(datasetId: string): Promise<DatasetProfilingResult> {
+  const response = await apiFetch(
+    `${getApiBaseUrl()}/datasets/${encodeURIComponent(datasetId)}/profiling`,
+    { method: 'POST' }
+  );
+  if (!response.ok) throw await readApiError(response, 'Could not refresh dataset profiling');
+  return mapDatasetProfilingResult(await response.json());
+}
+
 export function getSupportedUploadDetails(
   fileName: string
 ): { type: 'tabular' | 'computer-vision'; format: 'CSV' | 'XLSX' | 'ZIP' } | null {
@@ -427,11 +485,15 @@ export async function deleteDataset(id: string): Promise<boolean> {
 
 export interface LeakageAnalysisOptions {
   entityColumn?: string;
+  entityColumns?: string[];
+  contaminationKeyColumns?: string[];
   splitColumn?: string;
   targetColumn?: string;
   timeColumn?: string;
+  temporalObjective?: 'future_prediction' | 'randomized_holdout';
   splitStrategy?: 'existing' | 'generated' | 'none';
   splitOperationId?: string;
+  configurationConfirmed?: boolean;
 }
 
 type DetectorStageStatus = AnalysisStage['status'];
@@ -441,12 +503,14 @@ export function buildAnalysisStages(
   options: LeakageAnalysisOptions = {},
   execution: 'not_started' | 'running' | 'completed' | 'failed' = 'not_started'
 ): AnalysisStage[] {
-  const hasEntity = Boolean(options.entityColumn);
+  const hasEntity = Boolean(options.entityColumns?.length || options.entityColumn);
   const hasSplit = options.splitStrategy === 'none'
     ? false
     : Boolean(options.splitColumn || (options.splitStrategy === 'generated' && options.splitOperationId));
   const hasTime = Boolean(options.timeColumn);
   const noSplit = options.splitStrategy === 'none';
+  const randomizedTemporalHoldout =
+    options.temporalObjective === 'randomized_holdout' && hasTime && hasSplit;
   const detectorStages: Array<{
     id: number;
     name: string;
@@ -521,7 +585,7 @@ export function buildAnalysisStages(
 
   return detectorStages.map((stage) => {
     let status: DetectorStageStatus;
-    if (stage.skipped) {
+    if (stage.skipped || (stage.id === 5 && randomizedTemporalHoldout)) {
       status = 'skipped';
     } else if (stage.needsConfiguration) {
       status = 'needs_configuration';
@@ -552,6 +616,8 @@ export function buildAnalysisStages(
           ? `${stage.requirement} The backend request completed successfully.`
           : stage.skipped && noSplit
             ? `${stage.requirement} Not evaluated because no split strategy was selected.`
+            : stage.id === 5 && randomizedTemporalHoldout
+              ? 'Temporal range ordering is not interpreted as leakage for a randomized-holdout objective.'
             : stage.requirement
     };
   });
@@ -569,18 +635,38 @@ export async function runDatasetAnalysis(
     `${getApiBaseUrl()}/datasets/${encodeURIComponent(datasetId)}/analyze/leakage`,
     typeof window === 'undefined' ? 'http://localhost' : window.location.origin
   );
-  // The route rejects an entity or time parameter without a split parameter.
-  // Omit incomplete optional pairs while still allowing independent detectors
-  // (exact duplicates, target leakage, and split-only contamination) to run.
+  // Legacy requests cannot provide split-dependent columns without a split.
+  // Explicit No Split requests can still persist user-confirmed entity/time
+  // configuration while the backend correctly marks those detectors skipped.
   if (options.splitColumn) url.searchParams.set('split_column', options.splitColumn);
   if (options.splitStrategy) url.searchParams.set('split_strategy', options.splitStrategy);
   if (options.splitOperationId) url.searchParams.set('split_operation_id', options.splitOperationId);
-  if (options.targetColumn) url.searchParams.set('target_column', options.targetColumn);
-  if (options.entityColumn && options.splitColumn) {
-    url.searchParams.set('entity_column', options.entityColumn);
+  if (options.configurationConfirmed) {
+    url.searchParams.set('configuration_confirmed', 'true');
   }
-  if (options.timeColumn && options.splitColumn) {
+  if (options.targetColumn) url.searchParams.set('target_column', options.targetColumn);
+  options.contaminationKeyColumns?.forEach((column) => {
+    url.searchParams.append('contamination_key_columns', column);
+  });
+  const hasResolvedSplit = Boolean(
+    options.splitColumn
+    || (options.splitStrategy === 'generated' && options.splitOperationId)
+  );
+  const entityColumns = options.entityColumns?.length
+    ? options.entityColumns
+    : options.entityColumn ? [options.entityColumn] : [];
+  const canPersistSplitDependentConfiguration =
+    hasResolvedSplit || options.splitStrategy === 'none';
+  if (entityColumns.length > 1 && canPersistSplitDependentConfiguration) {
+    entityColumns.forEach((column) => url.searchParams.append('entity_columns', column));
+  } else if (entityColumns.length === 1 && canPersistSplitDependentConfiguration) {
+    url.searchParams.set('entity_column', entityColumns[0]);
+  }
+  if (options.timeColumn && canPersistSplitDependentConfiguration) {
     url.searchParams.set('time_column', options.timeColumn);
+  }
+  if (options.timeColumn && options.temporalObjective) {
+    url.searchParams.set('temporal_objective', options.temporalObjective);
   }
   const requestUrl = url.origin === 'http://localhost'
     ? `${url.pathname}${url.search}`
@@ -629,6 +715,12 @@ export async function runDatasetAnalysis(
   const skippedDetectors = Array.isArray(data.skipped_detectors)
     ? data.skipped_detectors.filter((item): item is string => typeof item === 'string')
     : [];
+  const analysisConfiguration = isRecord(data.analysis_configuration)
+    ? data.analysis_configuration
+    : {};
+  const detectorApplicability = isRecord(data.detector_applicability)
+    ? data.detector_applicability
+    : {};
 
   return {
     id: `ans-${Date.now().toString(36)}`,
@@ -645,6 +737,8 @@ export async function runDatasetAnalysis(
     skippedDetectors,
     splitExplanation:
       typeof data.split_explanation === 'string' ? data.split_explanation : null,
+    analysisConfiguration,
+    detectorApplicability,
   };
 }
 
@@ -1084,6 +1178,96 @@ export async function getRemediationPlans(
   return { ...mapped, items: raw.items.map(mapRemediationPlanRecord) };
 }
 
+export async function previewTrainOnlyImputation(
+  datasetId: string,
+  request: ImputationRequest
+): Promise<ImputationPreview> {
+  if (!request.splitColumn.trim() || !request.trainingPartition.trim() || request.columns.length === 0) {
+    throw new Error('Choose a validated training split and at least one missing-value strategy.');
+  }
+  const response = await apiFetch(
+    `${getApiBaseUrl()}/datasets/${encodeURIComponent(datasetId)}/preprocessing/imputation/preview`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        split_column: request.splitColumn,
+        training_partition: request.trainingPartition,
+        ...(request.splitOperationId ? { split_operation_id: request.splitOperationId } : {}),
+        columns: request.columns.map((item) => ({
+          column: item.column,
+          method: item.method,
+          ...(item.constantValue !== undefined ? { constant_value: item.constantValue } : {}),
+        })),
+      }),
+    }
+  );
+  if (!response.ok) throw await readApiError(response, 'Could not preview train-only imputation');
+  const raw: unknown = await response.json();
+  if (!isRecord(raw)) throw new Error('Invalid train-only imputation preview response');
+  const mapped = toCamelCase(raw) as ImputationPreview;
+  if (
+    typeof mapped.previewToken !== 'string' ||
+    typeof mapped.sourceFileSha256 !== 'string' ||
+    typeof mapped.splitColumn !== 'string' ||
+    typeof mapped.trainingPartition !== 'string' ||
+    !Array.isArray(mapped.strategies) ||
+    !isRecord(mapped.missingCountsBefore) ||
+    !isRecord(mapped.missingCountsAfter) ||
+    typeof mapped.expectedRowCount !== 'number' ||
+    typeof mapped.expectedColumnCount !== 'number' ||
+    !Array.isArray(mapped.protectedColumns)
+  ) {
+    throw new Error('Invalid train-only imputation preview fields');
+  }
+  return mapped;
+}
+
+export async function executeTrainOnlyImputation(
+  datasetId: string,
+  request: ImputationRequest,
+  previewToken: string,
+  confirmed: boolean
+): Promise<ImputationOperation> {
+  if (!previewToken.trim() || confirmed !== true) {
+    throw new Error('A current imputation preview and explicit confirmation are required.');
+  }
+  const response = await apiFetch(
+    `${getApiBaseUrl()}/datasets/${encodeURIComponent(datasetId)}/preprocessing/imputation/execute`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        split_column: request.splitColumn,
+        training_partition: request.trainingPartition,
+        ...(request.splitOperationId ? { split_operation_id: request.splitOperationId } : {}),
+        columns: request.columns.map((item) => ({
+          column: item.column,
+          method: item.method,
+          ...(item.constantValue !== undefined ? { constant_value: item.constantValue } : {}),
+        })),
+        preview_token: previewToken,
+        confirmed,
+      }),
+    }
+  );
+  if (!response.ok) throw await readApiError(response, 'Could not execute confirmed imputation');
+  const raw: unknown = await response.json();
+  if (!isRecord(raw)) throw new Error('Invalid train-only imputation operation response');
+  const mapped = toCamelCase(raw) as ImputationOperation;
+  if (
+    typeof mapped.id !== 'string' ||
+    typeof mapped.datasetId !== 'string' ||
+    mapped.operationType !== 'train_only_imputation' ||
+    typeof mapped.status !== 'string' ||
+    !Array.isArray(mapped.affectedColumns) ||
+    !isRecord(mapped.operationMetadata)
+  ) {
+    throw new Error('Invalid train-only imputation operation fields');
+  }
+  return mapped;
+}
+
 export async function previewCombinedCleanedDataset(
   datasetId: string,
   selectedFindingIds: string[]
@@ -1516,6 +1700,64 @@ export async function createDistributionComparison(referenceDatasetId: string, c
   return response.json();
 }
 
+export interface PartitionDistributionResult {
+  id: string;
+  datasetId: string;
+  createdAt: string;
+  result: Record<string, unknown>;
+}
+
+function mapPartitionDistributionResult(raw: unknown): PartitionDistributionResult {
+  if (!isRecord(raw) || !isRecord(raw.result)) {
+    throw new Error('Invalid partition distribution response');
+  }
+  if (
+    typeof raw.id !== 'string' ||
+    typeof raw.dataset_id !== 'string' ||
+    typeof raw.created_at !== 'string'
+  ) {
+    throw new Error('Invalid partition distribution response fields');
+  }
+  return {
+    id: raw.id,
+    datasetId: raw.dataset_id,
+    createdAt: raw.created_at,
+    // Feature map keys are user-provided column names and must remain verbatim.
+    result: raw.result,
+  };
+}
+
+export async function getPartitionDistributionAnalysis(
+  datasetId: string
+): Promise<PartitionDistributionResult | null> {
+  const response = await apiFetch(
+    `${getApiBaseUrl()}/datasets/${encodeURIComponent(datasetId)}/distribution-analysis`
+  );
+  if (response.status === 404) return null;
+  if (!response.ok) throw await readApiError(response, 'Could not load partition distribution analysis');
+  return mapPartitionDistributionResult(await response.json());
+}
+
+export async function createPartitionDistributionAnalysis(
+  datasetId: string,
+  referencePartition: string,
+  comparisonPartition: string
+): Promise<PartitionDistributionResult> {
+  const response = await apiFetch(
+    `${getApiBaseUrl()}/datasets/${encodeURIComponent(datasetId)}/distribution-analysis`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        reference_partition: referencePartition,
+        comparison_partition: comparisonPartition,
+      }),
+    }
+  );
+  if (!response.ok) throw await readApiError(response, 'Could not compare dataset partitions');
+  return mapPartitionDistributionResult(await response.json());
+}
+
 // ==========================================
 // INFERENCE PROVENANCE
 // ==========================================
@@ -1666,7 +1908,7 @@ function mapAssuranceReport(record: {
         ) as PersistedReportImpact;
       })
     : [];
-  const persistedContent: PersistedReportContent = { datasets, impact };
+  const persistedContent: PersistedReportContent = { datasets, impact, snapshot: rawContent };
   const firstDataset = datasets[0];
   const datasetName = firstDataset
     ? `${firstDataset.name} (${firstDataset.format})`
@@ -1712,8 +1954,18 @@ function mapAssuranceReport(record: {
 }
 
 export async function getReportById(id: string): Promise<AssuranceReport | null> {
-  const reports = await getReports();
-  return reports.find((report) => report.id === id) ?? null;
+  const response = await apiFetch(`${getApiBaseUrl()}/reports/${encodeURIComponent(id)}`);
+  if (response.status === 404) return null;
+  if (!response.ok) throw await readApiError(response, 'Could not load report');
+  const raw: unknown = await response.json();
+  if (!isRecord(raw)) throw new Error('Invalid persisted report response');
+  return mapAssuranceReport({
+    id: String(raw.id ?? ''),
+    title: String(raw.title ?? 'Persisted report'),
+    created_at: typeof raw.created_at === 'string' ? raw.created_at : undefined,
+    dataset_id: typeof raw.dataset_id === 'string' ? raw.dataset_id : null,
+    content: raw.content,
+  });
 }
 
 export async function generateAssuranceReport(datasetId: string, _modelId: string): Promise<AssuranceReport> {
@@ -1739,7 +1991,7 @@ export async function deleteReport(id: string): Promise<boolean> {
   return true;
 }
 
-export async function downloadReport(id: string, format: 'json' | 'html'): Promise<void> {
+export async function downloadReport(id: string, format: 'json' | 'html' | 'pdf' | 'csv'): Promise<void> {
   const response = await apiFetch(`${getApiBaseUrl()}/reports/${encodeURIComponent(id)}/download?format=${format}`);
   if (!response.ok) throw await readApiError(response, 'Could not download report');
   const url = `${getApiBaseUrl()}/reports/${encodeURIComponent(id)}/download?format=${format}`;

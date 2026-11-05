@@ -8,12 +8,23 @@ from sqlalchemy.orm import Session
 
 from app.api.identity import get_current_user
 from app.core.dataset_service import get_dataset_file_path
+from app.core.dataset_service import verify_dataset_integrity
 from app.db import models
 from app.db.session import get_db
 from app.schemas.workflows import (
-    DistributionCreate, ImpactCreate, ModelArtifactRead, ProvenanceCreate, ReportCreate,
+    DistributionCreate, ImpactCreate, ModelArtifactRead, PartitionDistributionCreate,
+    PartitionDistributionRead, ProvenanceCreate, ReportCreate,
 )
-from app.services.workflow_service import distribution_metrics, impact_metrics, report_html, report_payload
+from app.services.partition_distribution_service import compare_dataset_partitions
+from app.services.workflow_service import (
+    distribution_metrics,
+    impact_metrics,
+    report_csv,
+    report_html,
+    report_payload,
+    report_pdf,
+)
+from app.services.activity_service import record_user_event
 from app.utils.artifact_storage import get_model_path, save_model_artifact
 
 router = APIRouter()
@@ -166,6 +177,105 @@ def list_distribution_comparisons(
     ]
 
 
+@router.post(
+    "/datasets/{dataset_id}/distribution-analysis",
+    response_model=PartitionDistributionRead,
+    status_code=201,
+    tags=["distribution"],
+)
+def analyze_dataset_partitions(
+    dataset_id: str,
+    data: PartitionDistributionCreate,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
+    """Compare two user-selected labels in an owned dataset's configured split."""
+    dataset = _owned_dataset(db, dataset_id, user)
+    if dataset.type != "tabular" or (dataset.format or "").upper() not in {"CSV", "XLSX"}:
+        raise HTTPException(
+            status_code=422,
+            detail="Within-dataset partition analysis supports tabular CSV/XLSX datasets only",
+        )
+    if not verify_dataset_integrity(dataset):
+        raise HTTPException(
+            status_code=409,
+            detail="The stored source file is missing or no longer matches its registered SHA-256.",
+        )
+    try:
+        result = compare_dataset_partitions(
+            dataset,
+            reference_partition=data.reference_partition,
+            comparison_partition=data.comparison_partition,
+        )
+    except (FileNotFoundError, OSError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    event = record_user_event(
+        db,
+        user_id=user.id,
+        dataset_id=dataset.id,
+        event_type="partition_distribution_analysis",
+        outcome="completed",
+        title="Partition distribution analysis completed",
+        message=(
+            f"Compared {data.reference_partition!r} and "
+            f"{data.comparison_partition!r} for {dataset.name}."
+        ),
+        details={
+            "analysis_type": "within_dataset_partition_distribution",
+            "source_file_sha256": dataset.file_sha256,
+            "result": result,
+        },
+    )
+    return PartitionDistributionRead(
+        id=event.id,
+        dataset_id=dataset.id,
+        created_at=event.created_at.isoformat() if event.created_at else "",
+        result=result,
+    )
+
+
+@router.get(
+    "/datasets/{dataset_id}/distribution-analysis",
+    response_model=PartitionDistributionRead,
+    tags=["distribution"],
+)
+def get_latest_partition_distribution_analysis(
+    dataset_id: str,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
+    """Return the latest persisted within-dataset partition comparison."""
+    dataset = _owned_dataset(db, dataset_id, user)
+    if not verify_dataset_integrity(dataset):
+        raise HTTPException(
+            status_code=409,
+            detail="The stored source file is missing or no longer matches its registered SHA-256.",
+        )
+    event = db.query(models.AuditEvent).filter(
+        models.AuditEvent.user_id == user.id,
+        models.AuditEvent.dataset_id == dataset.id,
+        models.AuditEvent.event_type == "partition_distribution_analysis",
+        models.AuditEvent.outcome == "completed",
+    ).order_by(models.AuditEvent.created_at.desc(), models.AuditEvent.id.asc()).first()
+    if event is None or not isinstance(event.details, dict):
+        raise HTTPException(status_code=404, detail="No partition distribution analysis is available.")
+    result = event.details.get("result")
+    if not isinstance(result, dict):
+        raise HTTPException(status_code=409, detail="Persisted distribution analysis is incomplete.")
+    if result.get("source_file_sha256") != dataset.file_sha256:
+        raise HTTPException(
+            status_code=409,
+            detail="The persisted analysis is stale because the registered dataset hash changed.",
+        )
+    return PartitionDistributionRead(
+        id=event.id,
+        dataset_id=dataset.id,
+        created_at=event.created_at.isoformat() if event.created_at else "",
+        result=result,
+    )
+
+
 @router.post("/impact-metrics", status_code=201)
 def create_impact(data: ImpactCreate, db: Session = Depends(get_db), user: models.User = Depends(get_current_user)):
     _owned_dataset(db, data.dataset_id, user)
@@ -209,7 +319,14 @@ def create_report(data: ReportCreate, db: Session = Depends(get_db), user: model
     db.add(record)
     db.commit()
     db.refresh(record)
-    return {"id": record.id, "title": record.title, "format": record.format, "created_at": record.created_at, "content": payload}
+    return {
+        "id": record.id,
+        "title": record.title,
+        "format": record.format,
+        "created_at": record.created_at,
+        "dataset_id": record.dataset_id,
+        "content": payload,
+    }
 
 
 @router.get("/reports")
@@ -234,6 +351,28 @@ def list_reports(
     ]
 
 
+@router.get("/reports/{report_id}")
+def get_report(
+    report_id: str,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
+    record = db.query(models.ReportMetadata).filter(
+        models.ReportMetadata.id == report_id,
+        models.ReportMetadata.owner_user_id == user.id,
+    ).first()
+    if record is None:
+        raise HTTPException(status_code=404, detail="Report not found")
+    return {
+        "id": record.id,
+        "title": record.title,
+        "format": record.format,
+        "created_at": record.created_at,
+        "dataset_id": record.dataset_id,
+        "content": record.content_json,
+    }
+
+
 @router.delete("/reports/{report_id}", status_code=204)
 def delete_report(
     report_id: str,
@@ -255,10 +394,17 @@ def download_report(report_id: str, format: str = "json", db: Session = Depends(
     report = db.query(models.ReportMetadata).filter_by(id=report_id, owner_user_id=user.id).first()
     if not report:
         raise HTTPException(status_code=404, detail="Report not found")
-    if format.lower() == "html":
+    selected_format = format.lower()
+    if selected_format == "html":
         body = report_html(report.title, report.content_json).encode("utf-8")
         return Response(body, media_type="text/html", headers={"Content-Disposition": f'attachment; filename="{report.id}.html"'})
-    if format.lower() != "json":
-        raise HTTPException(status_code=400, detail="format must be json or html")
+    if selected_format == "pdf":
+        body = report_pdf(report.title, report.content_json)
+        return Response(body, media_type="application/pdf", headers={"Content-Disposition": f'attachment; filename="{report.id}.pdf"'})
+    if selected_format == "csv":
+        body = report_csv(report.content_json)
+        return Response(body, media_type="text/csv; charset=utf-8", headers={"Content-Disposition": f'attachment; filename="{report.id}.csv"'})
+    if selected_format != "json":
+        raise HTTPException(status_code=400, detail="format must be json, html, pdf, or csv")
     body = json.dumps(report.content_json, indent=2, default=str).encode("utf-8")
     return Response(body, media_type="application/json", headers={"Content-Disposition": f'attachment; filename="{report.id}.json"'})

@@ -32,6 +32,8 @@ class LeakageAnalysisResponse(BaseModel):
     split_configuration: Dict[str, Any] = Field(default_factory=dict)
     skipped_detectors: List[str] = Field(default_factory=list)
     split_explanation: Optional[str] = None
+    analysis_configuration: Dict[str, Any] = Field(default_factory=dict)
+    detector_applicability: Dict[str, Any] = Field(default_factory=dict)
 
     model_config = {
         "from_attributes": True,

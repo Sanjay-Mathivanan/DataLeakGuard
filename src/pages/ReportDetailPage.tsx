@@ -45,11 +45,11 @@ export const ReportDetailPage: React.FC = () => {
     load();
   }, [id]);
 
-  const handleDownloadHTML = async () => {
+  const handleDownload = async (format: 'pdf' | 'csv' | 'json' | 'html') => {
     if (!id) return;
     try {
-      await downloadReport(id, 'html');
-      success('Report Downloaded', 'The persisted HTML report was downloaded.');
+      await downloadReport(id, format);
+      success('Report Downloaded', `The persisted report was downloaded as ${format.toUpperCase()}.`);
     } catch (downloadError) {
       error('Download Error', downloadError instanceof Error ? downloadError.message : 'Could not download report.');
     }
@@ -100,6 +100,25 @@ export const ReportDetailPage: React.FC = () => {
     operations_completed: 'Completed operations',
     affected_rows: 'Affected rows',
   };
+  const snapshot = report.persistedContent?.snapshot ?? {};
+  const datasetReports = Array.isArray(snapshot.dataset_reports)
+    ? snapshot.dataset_reports.filter(
+      (value): value is Record<string, unknown> => (
+        value !== null && typeof value === 'object' && !Array.isArray(value)
+      )
+    )
+    : [];
+  const persistedSections = [
+    ['profiling', 'Dataset profiling'],
+    ['analysis', 'Leakage analysis and configuration'],
+    ['leakage', 'Persisted leakage findings'],
+    ['distribution_analysis', 'Partition distribution analysis'],
+    ['remediation', 'Remediation operations'],
+    ['post_remediation_verification', 'Post-remediation verification'],
+    ['remaining_unresolved_findings', 'Unresolved findings'],
+    ['skipped_analyses', 'Skipped analyses'],
+    ['limitations_and_recommendations', 'Limitations and recommendations'],
+  ] as const;
 
   return (
     <div className="space-y-6 max-w-4xl mx-auto animate-in fade-in duration-200">
@@ -114,13 +133,16 @@ export const ReportDetailPage: React.FC = () => {
         </button>
 
         <div className="flex items-center gap-2">
-          <button
-            onClick={handleDownloadHTML}
-            className="px-4 py-2 text-xs font-semibold rounded-lg bg-teal-700 hover:bg-teal-800 text-white transition-colors flex items-center gap-2 shadow-xs"
-          >
-            <Download className="w-4 h-4" />
-            <span>Download HTML Report</span>
-          </button>
+          {(['pdf', 'csv', 'json', 'html'] as const).map((format) => (
+            <button
+              key={format}
+              onClick={() => void handleDownload(format)}
+              className="flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-50"
+            >
+              <Download className="h-3.5 w-3.5" />
+              {format.toUpperCase()}
+            </button>
+          ))}
         </div>
       </div>
 
@@ -209,6 +231,42 @@ export const ReportDetailPage: React.FC = () => {
             </div>
           ) : (
             <p className="text-xs text-slate-600">No persisted dataset manifest is available in this report.</p>
+          )}
+        </section>
+
+        <section className="space-y-3">
+          <h2 className="text-sm font-bold font-mono uppercase tracking-wider text-slate-900">
+            Persisted profiling, analysis, remediation and verification
+          </h2>
+          {datasetReports.length ? datasetReports.map((datasetReport, index) => {
+            const reportDataset = datasetReport.dataset as Record<string, unknown> | undefined;
+            return (
+              <div key={String(reportDataset?.id ?? index)} className="space-y-2 rounded-lg border border-slate-200 p-4">
+                <h3 className="text-xs font-semibold text-slate-800">
+                  {String(reportDataset?.name ?? 'Dataset')} · {String(reportDataset?.id ?? 'ID unavailable')}
+                </h3>
+                {persistedSections.map(([key, label]) => {
+                  const value = datasetReport[key];
+                  if (value === undefined) return null;
+                  const valueRecord = value !== null && typeof value === 'object' && !Array.isArray(value)
+                    ? value as Record<string, unknown>
+                    : null;
+                  return (
+                    <details key={key} className="rounded border border-slate-100 bg-slate-50 px-3 py-2">
+                      <summary className="cursor-pointer text-xs font-medium text-slate-700">
+                        {label}
+                        {valueRecord?.status ? ` · ${String(valueRecord.status).replaceAll('_', ' ')}` : ''}
+                      </summary>
+                      <pre className="mt-2 max-h-80 overflow-auto whitespace-pre-wrap break-words text-[10px] text-slate-600">
+                        {JSON.stringify(value, null, 2)}
+                      </pre>
+                    </details>
+                  );
+                })}
+              </div>
+            );
+          }) : (
+            <p className="text-xs text-slate-600">This historical report predates the consolidated persisted report sections.</p>
           )}
         </section>
 

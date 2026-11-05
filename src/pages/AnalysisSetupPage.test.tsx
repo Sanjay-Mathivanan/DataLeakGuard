@@ -28,6 +28,8 @@ test('analysis setup reads only explicitly confirmed, supported split strategies
       confirmed: true,
       targetColumn: 'readmitted_30d',
       entityColumn: 'patient_id',
+      entityColumns: ['patient_id', 'clinic_code'],
+      contaminationKeyColumns: ['sample reference'],
       splitColumn: '',
       timeColumn: 'admission_date',
       splitStrategy: 'none',
@@ -37,6 +39,37 @@ test('analysis setup reads only explicitly confirmed, supported split strategies
       confirmedAt: '2026-11-03T10:00:00Z',
     }));
     assert.equal(loadConfirmedAnalysisSetup('dataset-17')?.targetColumn, 'readmitted_30d');
+    assert.deepEqual(
+      loadConfirmedAnalysisSetup('dataset-17')?.entityColumns,
+      ['patient_id', 'clinic_code'],
+    );
+    assert.deepEqual(
+      loadConfirmedAnalysisSetup('dataset-17')?.contaminationKeyColumns,
+      ['sample reference'],
+    );
+    assert.equal(
+      loadConfirmedAnalysisSetup('dataset-17')?.temporalObjective,
+      'future_prediction',
+    );
+    const repeatedKeyConfig = JSON.parse(store.get(key) ?? '{}') as Record<string, unknown>;
+    repeatedKeyConfig.contaminationKeyColumns = ['same key', 'same key'];
+    store.set(key, JSON.stringify(repeatedKeyConfig));
+    assert.equal(loadConfirmedAnalysisSetup('dataset-17'), null);
+    store.set(key, JSON.stringify({
+      confirmed: true,
+      targetColumn: 'outcome',
+      entityColumn: '',
+      contaminationKeyColumns: ['repeat', 'repeat'],
+      splitColumn: '',
+      timeColumn: 'observed_at',
+      temporalObjective: 'unverified_objective',
+      splitStrategy: 'none',
+      splitRatio: 0.2,
+      splitSeed: 42,
+      splitOperation: null,
+      confirmedAt: '2026-11-03T10:00:00Z',
+    }));
+    assert.equal(loadConfirmedAnalysisSetup('dataset-17'), null);
     store.set(key, JSON.stringify({ confirmed: false, splitStrategy: 'none' }));
     assert.equal(loadConfirmedAnalysisSetup('dataset-17'), null);
     store.set(key, JSON.stringify({ confirmed: true, splitStrategy: 'automatic_magic' }));

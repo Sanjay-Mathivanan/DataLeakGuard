@@ -332,8 +332,15 @@ def test_no_valid_timestamps(client, test_db):
     response = client.post(
         f"/api/v1/datasets/{dataset_id}/analyze/leakage?time_column=event_date&split_column=split"
     )
-    assert response.status_code == status.HTTP_400_BAD_REQUEST
-    assert "No valid timestamps found in column 'event_date'" in response.json()["detail"]
+    assert response.status_code == status.HTTP_200_OK
+    result = response.json()
+    assert not any(
+        finding["finding_type"] == "temporal_leakage"
+        for finding in result["findings"]
+    )
+    temporal_applicability = result["detector_applicability"]["temporal_leakage"]
+    assert temporal_applicability["status"] == "review_required"
+    assert temporal_applicability["invalid_or_missing_timestamp_rows"] == 4
 
 
 def test_missing_time_column(client, test_db):

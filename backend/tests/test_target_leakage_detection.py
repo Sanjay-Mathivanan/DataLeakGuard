@@ -114,7 +114,10 @@ def test_deterministic_feature_target_mapping(client, test_db):
     assert finding["finding_type"] == "target_leakage"
     assert finding["severity"] == "high"
     assert finding["status"] == "open"
-    assert "Feature column 'feature' deterministically maps each feature value to a single target value" in finding["description"]
+    assert finding["description"] == (
+        "Feature column 'feature' is a reversible encoding of target 'target'."
+    )
+    assert finding["evidence"]["classification"] == "confirmed_reversible_encoding"
     assert finding["evidence"]["target_column"] == "target"
     assert finding["evidence"]["feature_column"] == "feature"
     assert finding["evidence"]["detection"] == "deterministic_feature_target_mapping"

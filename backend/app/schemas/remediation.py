@@ -21,6 +21,7 @@ class RemediationActionRequest(BaseModel):
     # Required for the server-side all-eligible selection mode.
     finding_type: str | None = Field(default=None, max_length=100)
     entity_column: str | None = Field(default=None, max_length=200)
+    entity_columns: list[str] = Field(default_factory=list, max_length=20)
     split_column: str | None = Field(default=None, max_length=200)
     target_column: str | None = Field(default=None, max_length=200)
     feature_columns: list[str] = Field(default_factory=list, max_length=200)
@@ -44,8 +45,22 @@ class RemediationActionRequest(BaseModel):
         elif not self.finding_type:
             raise ValueError("all_eligible selection requires finding_type")
         if self.action == "rebuild_group_split":
-            if not self.entity_column or not self.split_column:
-                raise ValueError("Group-aware split rebuilding requires entity_column and split_column")
+            normalized_entities = [
+                value.strip()
+                for value in self.entity_columns
+                if isinstance(value, str) and value.strip()
+            ]
+            if (
+                len(normalized_entities) != len(self.entity_columns)
+                or len(set(normalized_entities)) != len(normalized_entities)
+            ):
+                raise ValueError("entity_columns must contain unique, non-empty names")
+            if self.entity_column and normalized_entities:
+                raise ValueError("Provide entity_column or entity_columns, not both")
+            if not self.entity_column and not normalized_entities:
+                raise ValueError("Group-aware split rebuilding requires an entity key")
+            if not self.split_column:
+                raise ValueError("Group-aware split rebuilding requires split_column")
             if self.test_ratio is None or self.random_seed is None:
                 raise ValueError("Group-aware split rebuilding requires test_ratio and random_seed")
         elif self.action == "exclude_target_features":

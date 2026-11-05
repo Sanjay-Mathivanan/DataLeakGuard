@@ -10,6 +10,19 @@ import {
 
 const PAGE_SIZE = 50;
 
+function formatBytes(value: number | null | undefined): string {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return 'Unavailable';
+  if (value < 1024) return `${value} B`;
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let amount = value;
+  let unitIndex = -1;
+  do {
+    amount /= 1024;
+    unitIndex += 1;
+  } while (amount >= 1024 && unitIndex < units.length - 1);
+  return `${amount.toFixed(1)} ${units[unitIndex]}`;
+}
+
 export const FeatureProfiles: React.FC<{ dataset: Dataset }> = ({ dataset }) => {
   const columns = dataset.columns ?? [];
   const [search, setSearch] = useState('');
@@ -62,7 +75,7 @@ export const FeatureProfiles: React.FC<{ dataset: Dataset }> = ({ dataset }) => 
   return (
     <div className="space-y-4">
       <section aria-label="Feature profile summary">
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-8">
           {[
             ['Columns', summary.totalColumns],
             ['Numeric', summary.numericColumns],
@@ -70,15 +83,24 @@ export const FeatureProfiles: React.FC<{ dataset: Dataset }> = ({ dataset }) => 
             ['Date/time', summary.datetimeColumns],
             ['Missing values', summary.totalMissing],
             ['Columns with missing', summary.columnsWithMissing],
+            ['Duplicate rows', dataset.profile?.duplicateRowCount],
+            ['Completeness', typeof dataset.profile?.dataQuality?.completenessPercentage === 'number'
+              ? `${dataset.profile.dataQuality.completenessPercentage.toFixed(1)}%`
+              : null],
           ].map(([label, value]) => (
             <div key={String(label)} className="rounded-lg border border-slate-200 bg-white p-3">
               <span className="block text-[10px] text-slate-500">{label}</span>
               <strong className="mt-1 block font-mono text-lg tabular-nums text-slate-900">
-                {typeof value === 'number' ? value.toLocaleString() : 'Unavailable'}
+                {typeof value === 'number' ? value.toLocaleString() : typeof value === 'string' ? value : 'Unavailable'}
               </strong>
             </div>
           ))}
         </div>
+        <p className="mt-2 text-[10px] text-slate-500">
+          File size: {formatBytes(dataset.profile?.fileSizeBytes)} · Approx. in-memory size:{' '}
+          {formatBytes(dataset.profile?.memoryUsageBytes)}
+          {dataset.profile?.profiledAt ? ` · Profiled ${new Date(dataset.profile.profiledAt).toLocaleString()}` : ''}
+        </p>
         {summary.totalMissing === null && (
           <p className="mt-2 text-[10px] text-slate-500">
             Missing-value totals are unavailable because the stored profile does not include every column count.
@@ -165,11 +187,13 @@ export const FeatureProfiles: React.FC<{ dataset: Dataset }> = ({ dataset }) => 
           <tbody className="divide-y divide-slate-100 bg-white">
             {visible.map((column) => {
               const columnKind = classifyProfileColumn(column);
-              const missingPercent = typeof column.missingCount === 'number'
-                && typeof dataset.sampleCount === 'number'
-                && dataset.sampleCount > 0
-                ? (column.missingCount / dataset.sampleCount) * 100
-                : null;
+              const missingPercent = typeof column.missingPercentage === 'number'
+                ? column.missingPercentage
+                : typeof column.missingCount === 'number'
+                  && typeof dataset.sampleCount === 'number'
+                  && dataset.sampleCount > 0
+                  ? (column.missingCount / dataset.sampleCount) * 100
+                  : null;
               const topValues = column.statistics?.topValues ?? [];
               return (
                 <tr key={column.name} className="align-top hover:bg-slate-50/70">
@@ -197,11 +221,32 @@ export const FeatureProfiles: React.FC<{ dataset: Dataset }> = ({ dataset }) => 
                           ['Max', column.statistics.max],
                           ['Mean', column.statistics.mean],
                           ['Median', column.statistics.median],
+                          ['Std. deviation', column.statistics.standardDeviation],
+                          ['25th percentile', column.statistics.quantiles?.['25']],
+                          ['75th percentile', column.statistics.quantiles?.['75']],
+                          ['Zero values', column.statistics.zeroCount],
+                          ['Negative values', column.statistics.negativeCount],
                         ] as Array<[string, number | null | undefined]>).map(([label, value]) => (
                           <div key={label} className="flex gap-1">
                             <dt className="text-slate-400">{label}</dt>
                             <dd className="font-mono text-slate-700">
                               {typeof value === 'number' ? value.toLocaleString() : 'Unavailable'}
+                            </dd>
+                          </div>
+                        ))}
+                      </dl>
+                    ) : column.statistics?.kind === 'datetime' ? (
+                      <dl className="grid grid-cols-1 gap-y-1 text-[10px]">
+                        {([
+                          ['Minimum timestamp', column.statistics.minimum],
+                          ['Maximum timestamp', column.statistics.maximum],
+                          ['Invalid timestamps', column.statistics.invalidOrUnparseableCount],
+                          ['Missing timestamps', column.statistics.missingTimestampCount],
+                        ] as Array<[string, string | number | null | undefined]>).map(([label, value]) => (
+                          <div key={label} className="flex gap-1">
+                            <dt className="text-slate-400">{label}</dt>
+                            <dd className="font-mono text-slate-700">
+                              {value == null ? 'Unavailable' : String(value)}
                             </dd>
                           </div>
                         ))}
@@ -213,6 +258,9 @@ export const FeatureProfiles: React.FC<{ dataset: Dataset }> = ({ dataset }) => 
                             <li key={`${column.name}-preview-${index}`} className="break-words">
                               <span className="font-mono">{entry.value}</span>
                               <span className="text-slate-400"> · {entry.count.toLocaleString()}</span>
+                              {typeof entry.percentage === 'number' && (
+                                <span className="text-slate-400"> ({entry.percentage.toFixed(1)}%)</span>
+                              )}
                             </li>
                           ))}
                         </ul>
@@ -226,6 +274,9 @@ export const FeatureProfiles: React.FC<{ dataset: Dataset }> = ({ dataset }) => 
                                 <li key={`${column.name}-extra-${index}`} className="break-words">
                                   <span className="font-mono">{entry.value}</span>
                                   <span className="text-slate-400"> · {entry.count.toLocaleString()}</span>
+                                  {typeof entry.percentage === 'number' && (
+                                    <span className="text-slate-400"> ({entry.percentage.toFixed(1)}%)</span>
+                                  )}
                                 </li>
                               ))}
                             </ul>

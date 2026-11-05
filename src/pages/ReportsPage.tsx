@@ -12,7 +12,7 @@ import {
   ShieldCheck,
   Search
 } from 'lucide-react';
-import { AssuranceReport } from '../types';
+import { AssuranceReport, Dataset } from '../types';
 import { getDatasets, getReports, deleteReport, downloadReport, generateAssuranceReport } from '../services/api';
 import { StatusBadge } from '../components/common/StatusBadge';
 import { ConfirmModal } from '../components/common/ConfirmModal';
@@ -21,9 +21,11 @@ import { useToast } from '../context/ToastContext';
 
 export const ReportsPage: React.FC = () => {
   const navigate = useNavigate();
-  const { success, error, info } = useToast();
+  const { success, error } = useToast();
 
   const [reports, setReports] = useState<AssuranceReport[]>([]);
+  const [datasets, setDatasets] = useState<Dataset[]>([]);
+  const [selectedDatasetId, setSelectedDatasetId] = useState('');
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
   const [search, setSearch] = useState('');
@@ -33,8 +35,9 @@ export const ReportsPage: React.FC = () => {
   const fetchReports = async () => {
     setLoadError('');
     try {
-      const data = await getReports();
+      const [data, ownedDatasets] = await Promise.all([getReports(), getDatasets()]);
       setReports(data);
+      setDatasets(ownedDatasets);
     } catch (fetchError) {
       setLoadError(fetchError instanceof Error ? fetchError.message : 'Could not load persisted reports.');
     } finally {
@@ -49,14 +52,16 @@ export const ReportsPage: React.FC = () => {
   const handleGenerate = async () => {
     setIsGenerating(true);
     try {
-      const datasets = await getDatasets();
-      if (datasets.length === 0) throw new Error('Upload a dataset before generating a report.');
-      const created = await generateAssuranceReport(datasets[0].id, '');
+      if (!selectedDatasetId) throw new Error('Select the dataset this report should describe.');
+      const created = await generateAssuranceReport(selectedDatasetId, '');
       success('Report Generated', `Persisted dataset snapshot ${created.id}.`);
       await fetchReports();
       navigate(`/reports/${created.id}`);
-    } catch {
-      error('Report Generation Error', 'Failed to compile assurance document.');
+    } catch (generationError) {
+      error(
+        'Report Generation Error',
+        generationError instanceof Error ? generationError.message : 'Could not compile the persisted report.'
+      );
     } finally {
       setIsGenerating(false);
     }
@@ -76,10 +81,13 @@ export const ReportsPage: React.FC = () => {
 
   const handleDownloadReport = async (reportId: string, title: string) => {
     try {
-      await downloadReport(reportId, 'html');
-      success('Report Downloaded', `${title} was downloaded as HTML.`);
-    } catch {
-      error('Download Error', 'Could not download the persisted report.');
+      await downloadReport(reportId, 'pdf');
+      success('Report Downloaded', `${title} was downloaded as PDF.`);
+    } catch (downloadError) {
+      error(
+        'Download Error',
+        downloadError instanceof Error ? downloadError.message : 'Could not download the persisted report.'
+      );
     }
   };
 
@@ -103,18 +111,34 @@ export const ReportsPage: React.FC = () => {
             Dataset Integrity Reports
           </h1>
           <p className="text-xs text-slate-500 mt-1">
-            Persisted dataset identifiers, file hashes, and impact counts. Model evaluation, risk scores, and assurance dispositions are not generated.
+            Reports snapshot available profiling, findings, partition comparisons, remediation and verification records. Model evaluation and assurance ratings are not generated.
           </p>
         </div>
 
-        <button
-          onClick={handleGenerate}
-          disabled={isGenerating}
-          className="px-4 py-2 text-xs font-semibold rounded-lg bg-teal-700 hover:bg-teal-800 disabled:opacity-50 text-white transition-colors flex items-center gap-2 self-start sm:self-auto shadow-xs"
-        >
-          <Plus className="w-4 h-4" />
-          <span>{isGenerating ? 'Compiling Audit...' : 'Generate New Report'}</span>
-        </button>
+        <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
+          <label className="text-xs text-slate-600">
+            Report dataset
+            <select
+              aria-label="Report dataset"
+              value={selectedDatasetId}
+              onChange={(event) => setSelectedDatasetId(event.target.value)}
+              className="mt-1 block min-w-56 rounded-lg border border-slate-300 bg-white px-3 py-2"
+            >
+              <option value="">Select an owned dataset</option>
+              {datasets.map((dataset) => <option key={dataset.id} value={dataset.id}>{dataset.name}</option>)}
+            </select>
+          </label>
+          <button
+            onClick={handleGenerate}
+            disabled={isGenerating || !selectedDatasetId}
+            className="self-end rounded-lg bg-teal-700 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-teal-800 disabled:opacity-50 sm:self-end"
+          >
+            <span className="flex items-center gap-2">
+              <Plus className="h-4 w-4" />
+              {isGenerating ? 'Generating…' : 'Generate Report'}
+            </span>
+          </button>
+        </div>
       </div>
 
       {/* Search Input */}
@@ -202,7 +226,7 @@ export const ReportsPage: React.FC = () => {
                         <button
                           onClick={() => handleDownloadReport(rep.id, rep.title)}
                           className="p-1.5 text-slate-400 hover:text-emerald-600 hover:bg-slate-100 rounded transition-colors"
-                          title="Download HTML report"
+                          title="Download PDF report"
                         >
                           <Download className="w-3.5 h-3.5" />
                         </button>

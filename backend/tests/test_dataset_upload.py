@@ -35,21 +35,25 @@ def test_upload_csv(client):
     assert data["profile"] is not None
     assert data["profile"]["row_count"] == 3
     assert data["profile"]["column_count"] == 2
+    assert data["profile"]["duplicate_row_count"] == 1
+    assert data["profile"]["total_missing_values"] == 0
+    assert len(data["profile"]["column_profiles"]) == 2
     assert data["status"] == "Uploaded"
     age_profile = next(column for column in data["columns"] if column["name"] == "age")
-    assert age_profile["statistics"] == {
-        "kind": "numeric",
-        "min": 25.0,
-        "max": 30.0,
-        "mean": 28.333333333333332,
-        "median": 30.0,
-    }
+    assert age_profile["statistics"]["kind"] == "numeric"
+    assert age_profile["statistics"]["min"] == 25.0
+    assert age_profile["statistics"]["max"] == 30.0
+    assert age_profile["statistics"]["mean"] == pytest.approx(28.333333333333332)
+    assert age_profile["statistics"]["median"] == 30.0
+    assert age_profile["statistics"]["standardDeviation"] == pytest.approx(2.8867513459)
+    assert age_profile["statistics"]["quantiles"] == {"25": 27.5, "50": 30.0, "75": 30.0}
+    assert age_profile["statistics"]["zeroCount"] == 0
+    assert age_profile["statistics"]["negativeCount"] == 0
     name_profile = next(column for column in data["columns"] if column["name"] == "name")
     assert name_profile["statistics"]["kind"] == "categorical"
-    assert name_profile["statistics"]["topValues"][0] == {
-        "value": "Alice",
-        "count": 2,
-    }
+    assert name_profile["statistics"]["topValues"][0]["value"] == "Alice"
+    assert name_profile["statistics"]["topValues"][0]["count"] == 2
+    assert name_profile["statistics"]["topValues"][0]["percentage"] == pytest.approx(200 / 3)
     # Verify file exists
     storage_path = ORIGINAL_DIR / data["storage_filename"]
     assert os.path.exists(storage_path)
@@ -238,7 +242,7 @@ def test_upload_profiling_failure_does_not_leave_an_orphan(test_db, monkeypatch)
         def fail_profile(storage_path):
             raise RuntimeError("simulated profiling failure")
 
-        monkeypatch.setattr(dataset_service, "profile_tabular", fail_profile)
+        monkeypatch.setattr(dataset_service, "read_tabular_frame", fail_profile)
         with pytest.raises(RuntimeError, match="simulated profiling failure"):
             create_dataset_from_upload(
                 db,

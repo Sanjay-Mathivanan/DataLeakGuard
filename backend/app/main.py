@@ -6,6 +6,7 @@ from app.api.v1 import (
     datasets,
     findings,
     health,
+    preprocessing,
     quarantine,
     remediation,
     repairs,
@@ -38,6 +39,7 @@ app.include_router(auth.router, prefix=settings.API_V1_STR)
 app.include_router(workspace.router, prefix=settings.API_V1_STR)
 app.include_router(workflows.router, prefix=settings.API_V1_STR)
 app.include_router(remediation.router, prefix=settings.API_V1_STR)
+app.include_router(preprocessing.router, prefix=settings.API_V1_STR)
 
 
 @app.get("/")

@@ -30,11 +30,39 @@ export interface DatasetProfile {
   targetClassCounts?: Record<string, number>;
   splitColumn?: string | null;
   splitRowCounts?: Record<string, number>;
+  datasetName?: string | null;
+  rowCount?: number;
+  columnCount?: number;
+  fileFormat?: string | null;
+  fileSizeBytes?: number | null;
+  memoryUsageBytes?: number | null;
+  duplicateRowCount?: number;
+  totalMissingValues?: number;
+  dataQuality?: {
+    completenessPercentage?: number | null;
+    duplicateRowPercentage?: number | null;
+    summary?: string;
+  };
+  profiledAt?: string;
+  columnProfiles?: Array<{
+    name: string;
+    dtype: string;
+    kind: 'numeric' | 'categorical' | 'datetime' | 'other';
+    nonNullCount: number;
+    missingCount: number;
+    missingPercentage: number | null;
+    uniqueCount: number;
+    duplicateValueCount: number;
+    statistics: Record<string, unknown>;
+  }>;
   analysisColumns?: {
     entityColumn?: string | null;
+    entityColumns?: string[];
+    contaminationKeyColumns?: string[];
     splitColumn?: string | null;
     targetColumn?: string | null;
     timeColumn?: string | null;
+    temporalObjective?: 'future_prediction' | 'randomized_holdout' | null;
   };
   splitStrategy?: Record<string, unknown>;
 }
@@ -56,15 +84,32 @@ export interface Dataset {
   columns?: {
     name: string;
     type: string;
+    kind?: 'numeric' | 'categorical' | 'datetime' | 'other';
     missingCount: number;
+    nonNullCount?: number;
+    missingPercentage?: number | null;
     uniqueCount: number;
+    duplicateValueCount?: number;
     statistics?: {
-      kind: 'numeric' | 'categorical';
+      kind: 'numeric' | 'categorical' | 'datetime' | 'other';
       min?: number | null;
       max?: number | null;
       mean?: number | null;
       median?: number | null;
-      topValues?: Array<{ value: string; count: number }>;
+      standardDeviation?: number | null;
+      quantiles?: Record<string, number | null>;
+      zeroCount?: number;
+      negativeCount?: number;
+      topValues?: Array<{ value: string; count: number; percentage?: number }>;
+      categoryCount?: number;
+      categoriesTruncated?: boolean;
+      mostFrequent?: { value: string; count: number; percentage: number } | null;
+      rareCategories?: Array<{ value: string; count: number; percentage: number }>;
+      minimum?: string | null;
+      maximum?: string | null;
+      invalidOrUnparseableCount?: number;
+      missingTimestampCount?: number;
+      timeRangeSeconds?: number | null;
     };
   }[];
   cvStats?: CVStats | null;
@@ -240,6 +285,8 @@ export interface AnalysisResult {
   splitConfiguration?: Record<string, unknown>;
   skippedDetectors?: string[];
   splitExplanation?: string | null;
+  analysisConfiguration?: Record<string, unknown>;
+  detectorApplicability?: Record<string, unknown>;
 }
 
 export interface SplitGenerationOperation {
@@ -333,6 +380,7 @@ export interface RemediationActionRequest {
   finding_ids?: string[];
   finding_type?: string;
   entity_column?: string;
+  entity_columns?: string[];
   split_column?: string;
   target_column?: string;
   feature_columns?: string[];
@@ -384,8 +432,22 @@ export interface RemediationPlanSummary {
   affectedSourceRowPositionsTruncated: boolean;
   affectedSourceRowPositionsSha256: string;
   excludedFeatureColumns: string[];
+  featureExclusionReasons?: Record<string, {
+    reason: string;
+    evidenceSignal?: string;
+    findingIds?: string[];
+  }>;
+  analysisConfiguration?: Record<string, unknown>;
+  remediationConfiguration?: Record<string, unknown>;
+  detectorCountsBefore?: Record<string, Record<string, number>>;
+  missingValueCountsBefore?: Record<string, number>;
+  missingValueCountsAfter?: Record<string, number>;
+  expectedOutputChange?: boolean;
+  sourceOutputIdentical?: boolean;
   splitUpdateCount: number;
   unresolvedFindingsCount: number;
+  unresolvedFindingIds?: string[];
+  verifiedFindingIds?: string[];
   finalStatus?: string;
   verification?: Record<string, unknown>;
   completedAt?: string;
@@ -424,6 +486,61 @@ export interface RemediationPlanPage {
   total: number;
   skip: number;
   limit: number;
+}
+
+export type ImputationMethod = 'mean' | 'median' | 'mode' | 'constant' | 'leave_missing';
+
+export interface ImputationColumnSelection {
+  column: string;
+  method: ImputationMethod;
+  constantValue?: string | number | boolean;
+}
+
+export interface ImputationRequest {
+  splitColumn: string;
+  trainingPartition: string;
+  splitOperationId?: string;
+  columns: ImputationColumnSelection[];
+}
+
+export interface ImputationStrategyResult {
+  column: string;
+  method: ImputationMethod;
+  fittedValue: string | number | null;
+  fitPartition: 'training_partition_only';
+  trainingObservedCount: number;
+  trainingMissingCount: number;
+  sourceMissingCount: number;
+}
+
+export interface ImputationPreview {
+  previewToken: string;
+  sourceFileSha256: string;
+  splitColumn: string;
+  trainingPartition: string;
+  fitRowCount: number;
+  strategies: ImputationStrategyResult[];
+  missingCountsBefore: Record<string, number>;
+  missingCountsAfter: Record<string, number>;
+  expectedRowCount: number;
+  expectedColumnCount: number;
+  protectedColumns: string[];
+  confirmationRequired: true;
+}
+
+export interface ImputationOperation {
+  id: string;
+  datasetId: string;
+  operationType: 'train_only_imputation';
+  status: string;
+  outputFilename: string | null;
+  inputFileSha256: string | null;
+  outputFileSha256: string | null;
+  affectedRows: number;
+  affectedColumns: string[];
+  operationMetadata: Record<string, unknown>;
+  createdAt: string | null;
+  completedAt: string | null;
 }
 
 export interface Model {
@@ -544,6 +661,7 @@ export interface PersistedReportImpact {
 export interface PersistedReportContent {
   datasets: PersistedReportDataset[];
   impact: PersistedReportImpact[];
+  snapshot?: Record<string, unknown>;
 }
 
 export interface AssuranceReport {

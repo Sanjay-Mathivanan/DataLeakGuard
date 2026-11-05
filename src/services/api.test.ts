@@ -5,16 +5,19 @@ import {
   buildAnalysisStages,
   deleteDataset,
   downloadOperationOutput,
+  executeTrainOnlyImputation,
   generateDatasetSplit,
   generateCombinedCleanedDataset,
   previewCombinedCleanedDataset,
   getCategoryOverviews,
   getDatasetById,
+  getDatasetProfiling,
   getDatasetHistoryPage,
   getColumnRecommendations,
   getDatasetOperationHistory,
   getRemediationPlans,
   previewRemediationPlan,
+  previewTrainOnlyImputation,
   executeRemediationPlan,
   cancelRemediationPlan,
   downloadRemediationArtifact,
@@ -23,8 +26,13 @@ import {
   getFindings,
   getFindingsPage,
   getDistributionShift,
+  getPartitionDistributionAnalysis,
   getReports,
+  getReportById,
   generateAssuranceReport,
+  createPartitionDistributionAnalysis,
+  downloadReport,
+  refreshDatasetProfiling,
   getSupportedUploadDetails,
   mapDatasetOperationRecord,
   mapPersistedFinding,
@@ -394,6 +402,9 @@ test('generated split analysis sends its operation reference and preserves backe
     assert.equal(url.searchParams.get('split_strategy'), 'generated');
     assert.equal(url.searchParams.get('split_operation_id'), 'split-operation-8');
     assert.equal(url.searchParams.get('split_column'), null);
+    assert.equal(url.searchParams.get('entity_column'), 'subject key');
+    assert.equal(url.searchParams.get('time_column'), 'observed_at');
+    assert.equal(url.searchParams.get('temporal_objective'), 'future_prediction');
     return new Response(JSON.stringify({
       dataset_id: 'dataset-4',
       rows_examined: 4,
@@ -414,7 +425,9 @@ test('generated split analysis sends its operation reference and preserves backe
     const result = await runDatasetAnalysis('dataset-4', {
       splitStrategy: 'generated',
       splitOperationId: 'split-operation-8',
-      entityColumn: 'patient_id',
+      entityColumn: 'subject key',
+      timeColumn: 'observed_at',
+      temporalObjective: 'future_prediction',
     });
     assert.equal(result.splitStrategy, 'generated');
     assert.equal(result.splitConfiguration?.random_seed, 8);
@@ -521,6 +534,7 @@ test('analysis query maps valid entity, target, temporal, and split selections t
     assert.equal(url.searchParams.get('split_column'), 'data split');
     assert.equal(url.searchParams.get('target_column'), 'outcome');
     assert.equal(url.searchParams.get('time_column'), 'event date');
+    assert.equal(url.searchParams.get('temporal_objective'), 'future_prediction');
     return new Response(JSON.stringify({
       findings: [
         { ...backendFinding, finding_type: 'entity_overlap' },
@@ -535,9 +549,109 @@ test('analysis query maps valid entity, target, temporal, and split selections t
       splitColumn: 'data split',
       targetColumn: 'outcome',
       timeColumn: 'event date',
+      temporalObjective: 'future_prediction',
     });
     assert.deepEqual(result.stages.filter((stage) => stage.status === 'completed').map((stage) => stage.id), [2, 3, 4, 5, 6]);
     assert.equal(result.summary.totalFindings, 4);
+  });
+});
+
+test('analysis request forwards confirmed generic contamination keys without fallback', async () => {
+  await withMockFetch(async (input) => {
+    const url = new URL(String(input), 'http://localhost');
+    assert.equal(url.searchParams.get('configuration_confirmed'), 'true');
+    assert.deepEqual(url.searchParams.getAll('contamination_key_columns'), [
+      'observation reference',
+      'visit sequence',
+    ]);
+    return new Response(JSON.stringify({
+      dataset_id: 'dataset-4',
+      rows_examined: 2,
+      duplicate_group_count: 0,
+      duplicated_row_count: 0,
+      findings: [],
+      split_strategy: 'existing',
+      analysis_configuration: {
+        configuration_confirmed: true,
+        contamination_key_columns: ['observation reference', 'visit sequence'],
+      },
+    }), { status: 200 });
+  }, async () => {
+    const result = await runDatasetAnalysis('dataset-4', {
+      splitStrategy: 'existing',
+      splitColumn: 'partition label',
+      contaminationKeyColumns: ['observation reference', 'visit sequence'],
+      configurationConfirmed: true,
+    });
+    assert.deepEqual(
+      result.analysisConfiguration?.contamination_key_columns,
+      ['observation reference', 'visit sequence'],
+    );
+  });
+});
+
+test('explicit no-split analysis preserves configured entity and timestamp selections', async () => {
+  await withMockFetch(async (input) => {
+    const url = new URL(String(input), 'http://localhost');
+    assert.equal(url.searchParams.get('split_strategy'), 'none');
+    assert.equal(url.searchParams.get('entity_column'), 'cohort reference');
+    assert.equal(url.searchParams.get('time_column'), 'observation time');
+    return new Response(JSON.stringify({
+      dataset_id: 'dataset-4',
+      rows_examined: 2,
+      duplicate_group_count: 0,
+      duplicated_row_count: 0,
+      findings: [],
+      split_strategy: 'none',
+      skipped_detectors: ['entity_overlap', 'temporal_leakage', 'train_test_contamination'],
+      analysis_configuration: {
+        entity_column: 'cohort reference',
+        entity_columns: ['cohort reference'],
+        time_column: 'observation time',
+        split_column: null,
+      },
+    }), { status: 200 });
+  }, async () => {
+    const result = await runDatasetAnalysis('dataset-4', {
+      splitStrategy: 'none',
+      entityColumn: 'cohort reference',
+      entityColumns: ['cohort reference'],
+      timeColumn: 'observation time',
+      configurationConfirmed: true,
+    });
+    assert.equal(result.analysisConfiguration?.entity_column, 'cohort reference');
+    assert.deepEqual(result.skippedDetectors, [
+      'entity_overlap',
+      'temporal_leakage',
+      'train_test_contamination',
+    ]);
+  });
+});
+
+test('randomized temporal holdout skips chronology instead of reporting it as passed', async () => {
+  await withMockFetch(async (input) => {
+    const url = new URL(String(input), 'http://localhost');
+    assert.equal(url.searchParams.get('temporal_objective'), 'randomized_holdout');
+    return new Response(JSON.stringify({
+      findings: [],
+      split_strategy: 'existing',
+      skipped_detectors: ['temporal_leakage'],
+      detector_applicability: {
+        temporal_leakage: {
+          status: 'skipped',
+          reason: 'Randomized holdout objective',
+        },
+      },
+    }), { status: 200 });
+  }, async () => {
+    const result = await runDatasetAnalysis('dataset-4', {
+      splitColumn: 'partition',
+      splitStrategy: 'existing',
+      timeColumn: 'observed at',
+      temporalObjective: 'randomized_holdout',
+    });
+    assert.equal(result.stages[4].status, 'skipped');
+    assert.deepEqual(result.skippedDetectors, ['temporal_leakage']);
   });
 });
 
@@ -1194,6 +1308,181 @@ test('report creation maps the persisted response without inventing a fallback r
   });
 });
 
+test('detailed profiling API maps statistics and preserves arbitrary column names', async () => {
+  const backendProfile = {
+    dataset_id: 'dataset-4',
+    dataset_name: 'Example dataset',
+    source_file_sha256: 'f'.repeat(64),
+    generated_at: '2026-11-05T12:00:00Z',
+    profile: {
+      row_count: 4,
+      column_count: 2,
+      columns: ['raw metric', 'class-label'],
+      dtypes: { 'raw metric': 'float64', 'class-label': 'object' },
+      column_profiles: [{
+        name: 'raw metric',
+        dtype: 'float64',
+        kind: 'numeric',
+        missing_count: 1,
+        missing_percentage: 25,
+        unique_count: 3,
+        statistics: {
+          mean: 2,
+          median: 2,
+          zero_count: 1,
+          negative_count: 0,
+        },
+      }],
+      total_missing_values: 1,
+    },
+  };
+
+  await withMockFetch(async (input, init) => {
+    assert.equal(String(input), '/api/v1/datasets/dataset-4/profiling');
+    assert.equal(init?.method, undefined);
+    return new Response(JSON.stringify(backendProfile), { status: 200 });
+  }, async () => {
+    const result = await getDatasetProfiling('dataset-4');
+    assert.equal(result.profile.rowCount, 4);
+    assert.equal(result.profile.totalMissingValues, 1);
+    const extendedProfile = result.profile as typeof result.profile & {
+      dtypes?: Record<string, string>;
+    };
+    assert.equal(extendedProfile.dtypes?.['raw metric'], 'float64');
+    const firstColumn = result.profile.columnProfiles?.[0];
+    assert.equal(firstColumn?.missingPercentage, 25);
+    assert.equal(firstColumn?.statistics.zeroCount, 1);
+  });
+
+  await withMockFetch(async (input, init) => {
+    assert.equal(String(input), '/api/v1/datasets/dataset-4/profiling');
+    assert.equal(init?.method, 'POST');
+    return new Response(JSON.stringify(backendProfile), { status: 201 });
+  }, async () => {
+    const result = await refreshDatasetProfiling('dataset-4');
+    assert.equal(result.sourceFileSha256, 'f'.repeat(64));
+  });
+});
+
+test('partition distribution API preserves generic feature keys and distinguishes absence', async () => {
+  const responseBody = {
+    id: 'event-8',
+    dataset_id: 'dataset-4',
+    created_at: '2026-11-05T12:00:00Z',
+    result: {
+      split_column: 'fold marker',
+      reference_partition: 'development',
+      comparison_partition: 'holdout',
+      features: {
+        'reading value': {
+          kind: 'numeric',
+          status: 'potential_distribution_shift',
+          mean_difference: 4,
+        },
+      },
+      target: { status: 'skipped', reason: 'No target selected.' },
+    },
+  };
+  await withMockFetch(async (input, init) => {
+    assert.equal(String(input), '/api/v1/datasets/dataset-4/distribution-analysis');
+    assert.equal(init?.method, undefined);
+    return new Response(JSON.stringify(responseBody), { status: 200 });
+  }, async () => {
+    const result = await getPartitionDistributionAnalysis('dataset-4');
+    assert.equal(result?.result.split_column, 'fold marker');
+    const features = result?.result.features as Record<string, unknown>;
+    assert.ok('reading value' in features);
+  });
+
+  await withMockFetch(async () => new Response('', { status: 404 }), async () => {
+    assert.equal(await getPartitionDistributionAnalysis('dataset-4'), null);
+  });
+
+  await withMockFetch(async (input, init) => {
+    assert.equal(String(input), '/api/v1/datasets/dataset-4/distribution-analysis');
+    assert.equal(init?.method, 'POST');
+    assert.deepEqual(JSON.parse(String(init?.body)), {
+      reference_partition: 'development',
+      comparison_partition: 'holdout',
+    });
+    return new Response(JSON.stringify(responseBody), { status: 201 });
+  }, async () => {
+    const created = await createPartitionDistributionAnalysis(
+      'dataset-4',
+      'development',
+      'holdout'
+    );
+    assert.equal(created.id, 'event-8');
+  });
+});
+
+test('report detail and download use the owner-scoped persisted report endpoints', async () => {
+  await withMockFetch(async (input) => {
+    assert.equal(String(input), '/api/v1/reports/report-22');
+    return new Response(JSON.stringify({
+      id: 'report-22',
+      title: 'Persisted report',
+      dataset_id: 'dataset-4',
+      created_at: '2026-11-05T12:00:00Z',
+      content: {
+        datasets: [{ id: 'dataset-4', name: 'Example', format: 'CSV', sha256: 'a'.repeat(64) }],
+        impact: [],
+        dataset_reports: [{ dataset: { id: 'dataset-4' }, profiling: { status: 'available' } }],
+      },
+    }), { status: 200 });
+  }, async () => {
+    const report = await getReportById('report-22');
+    assert.equal(report?.id, 'report-22');
+    assert.equal(
+      report?.persistedContent?.snapshot?.dataset_reports instanceof Array,
+      true
+    );
+  });
+
+  const originalDocument = Object.getOwnPropertyDescriptor(globalThis, 'document');
+  const clicked: Array<{ href: string; download: string }> = [];
+  const fakeDocument = {
+    cookie: '',
+    body: { appendChild: () => undefined },
+    createElement: () => {
+      const anchor = {
+        href: '',
+        download: '',
+        style: { display: '' },
+        click: () => clicked.push(anchor),
+        remove: () => undefined,
+      };
+      return anchor;
+    },
+  } as unknown as Document;
+  Object.defineProperty(globalThis, 'document', {
+    configurable: true,
+    value: fakeDocument,
+  });
+  try {
+    await withMockFetch(async (input) => {
+      assert.equal(
+        String(input),
+        '/api/v1/reports/report-22/download?format=pdf'
+      );
+      return new Response('%PDF-1.4', {
+        status: 200,
+        headers: { 'Content-Type': 'application/pdf' },
+      });
+    }, async () => {
+      await downloadReport('report-22', 'pdf');
+      assert.equal(clicked.length, 1);
+      assert.equal(clicked[0].download, 'report-22-report.pdf');
+    });
+  } finally {
+    if (originalDocument) {
+      Object.defineProperty(globalThis, 'document', originalDocument);
+    } else {
+      Reflect.deleteProperty(globalThis, 'document');
+    }
+  }
+});
+
 test('distribution comparison exposes persisted metrics and leaves unsupported metrics unavailable', async () => {
   await withMockFetch(async (input) => {
     assert.equal(String(input), '/api/v1/distribution-comparisons');
@@ -1218,5 +1507,107 @@ test('distribution comparison exposes persisted metrics and leaves unsupported m
       { featureName: 'age', metricKind: 'PSI', driftScore: 0.24 },
       { featureName: 'region', metricKind: 'Distribution delta', driftScore: 0.16 },
     ]);
+  });
+});
+
+test('imputation preview sends the selected training-only configuration and validates persisted preview data', async () => {
+  await withMockFetch(async (input, init) => {
+    assert.equal(
+      String(input),
+      '/api/v1/datasets/dataset-4/preprocessing/imputation/preview',
+    );
+    assert.equal(init?.method, 'POST');
+    assert.deepEqual(JSON.parse(String(init?.body)), {
+      split_column: 'partition label',
+      training_partition: 'training',
+      columns: [
+        { column: 'numeric field', method: 'median' },
+        { column: 'category field', method: 'constant', constant_value: 'unknown' },
+      ],
+    });
+    return new Response(JSON.stringify({
+      preview_token: 'a'.repeat(64),
+      source_file_sha256: 'b'.repeat(64),
+      split_column: 'partition label',
+      training_partition: 'training',
+      fit_row_count: 12,
+      strategies: [{
+        column: 'numeric field',
+        method: 'median',
+        fitted_value: '4.5',
+        fit_partition: 'training_partition_only',
+        training_observed_count: 10,
+        training_missing_count: 2,
+        source_missing_count: 3,
+      }],
+      missing_counts_before: { 'numeric field': 3 },
+      missing_counts_after: { 'numeric field': 0 },
+      expected_row_count: 20,
+      expected_column_count: 5,
+      protected_columns: ['target', 'partition label'],
+      confirmation_required: true,
+    }), { status: 200 });
+  }, async () => {
+    const result = await previewTrainOnlyImputation('dataset-4', {
+      splitColumn: 'partition label',
+      trainingPartition: 'training',
+      columns: [
+        { column: 'numeric field', method: 'median' },
+        { column: 'category field', method: 'constant', constantValue: 'unknown' },
+      ],
+    });
+    assert.equal(result.strategies[0].fittedValue, '4.5');
+    assert.equal(result.strategies[0].fitPartition, 'training_partition_only');
+    assert.equal(result.missingCountsAfter['numeric field'], 0);
+  });
+});
+
+test('imputation execution requires explicit confirmation and returns persisted verification metadata', async () => {
+  const request = {
+    splitColumn: 'partition label',
+    trainingPartition: 'train',
+    columns: [{ column: 'feature', method: 'mean' as const }],
+  };
+  await assert.rejects(
+    executeTrainOnlyImputation('dataset-4', request, 'a'.repeat(64), false),
+    /explicit confirmation/i,
+  );
+  await withMockFetch(async (input, init) => {
+    assert.equal(
+      String(input),
+      '/api/v1/datasets/dataset-4/preprocessing/imputation/execute',
+    );
+    assert.deepEqual(JSON.parse(String(init?.body)), {
+      split_column: 'partition label',
+      training_partition: 'train',
+      columns: [{ column: 'feature', method: 'mean' }],
+      preview_token: 'a'.repeat(64),
+      confirmed: true,
+    });
+    return new Response(JSON.stringify({
+      id: 'operation-1',
+      dataset_id: 'dataset-4',
+      operation_type: 'train_only_imputation',
+      status: 'completed',
+      output_filename: 'dlg_imputed_operation-1.csv',
+      input_file_sha256: 'b'.repeat(64),
+      output_file_sha256: 'c'.repeat(64),
+      affected_rows: 4,
+      affected_columns: ['feature'],
+      operation_metadata: {
+        verification: { status: 'verified', checks: { source_hash_unchanged: { status: 'passed' } } },
+      },
+      created_at: '2026-11-04T10:00:00Z',
+      completed_at: '2026-11-04T10:01:00Z',
+    }), { status: 201 });
+  }, async () => {
+    const operation = await executeTrainOnlyImputation(
+      'dataset-4',
+      request,
+      'a'.repeat(64),
+      true,
+    );
+    assert.equal(operation.operationType, 'train_only_imputation');
+    assert.equal(operation.operationMetadata.verification && (operation.operationMetadata.verification as { status: string }).status, 'verified');
   });
 });

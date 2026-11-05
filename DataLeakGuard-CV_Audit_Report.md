@@ -381,3 +381,139 @@ Residual security/operational limitations:
   deployment-topology caveats remain. This addendum does not certify
   production readiness.
 
+## Generic leakage/remediation maintenance addendum — 2026-11-04
+
+This is implementation/code-path and regression evidence, not a fresh
+penetration test or independent production security audit.
+
+The previous missing-entity-manifest symptom is addressed by carrying the
+last persisted user-confirmed analysis configuration into remediation preview,
+execution metadata and manifest. The snapshot validates configured columns
+against the current source; it does not guess an entity identifier. A
+composite entity key and optional contamination comparison key are supported.
+Missing configured values produce review-required applicability rather than
+being treated as a clean check.
+
+Detector behavior remains evidence-oriented: exact target copies and
+reversible mappings are distinguished from suspected deterministic mappings;
+temporal checks use UTC-normalized timestamps and an explicit objective;
+contamination evidence records matching fields, source positions and
+partitions. Fuzzy similarity is not automatically treated as contamination.
+Group-aware split rebuilding uses deterministic whole-group assignment with
+approximate row/target-class balancing, not an optimal stratified-group
+algorithm.
+
+Optional train-only imputation is now implemented through owner-scoped
+preview/execute APIs. The service fits selected statistics on training rows
+only, applies them to a separate CSV output, blocks configured role/comparison
+columns, validates a current preview token, preserves source bytes and
+records post-operation hash/content checks in operation metadata. This is a
+separate preprocessing copy, not an in-place source repair.
+
+Fresh isolated regression on 2026-11-04: backend **301 passed, 1 skipped,
+244 warnings**; frontend **95 passed**; TypeScript check, Python compilation
+and production build passed. Tests include five unrelated synthetic domain
+schemas and a 6,224-row synthetic case. Browser E2E, supplied real dataset
+execution, production-scale performance, multi-worker behavior and
+deployment-edge security remain **NOT VERIFIED**. No schema/migration change
+was made and the real project database/storage were not used by the tests.
+
+## Post-remediation verification consistency addendum — 2026-11-05
+
+This is a source-code and isolated-regression review, not a penetration test
+or independent audit of the supplied failed-operation files. The referenced
+manifest and repair report were not present in the checkout.
+
+Root causes verified in the remediation path:
+
+- Output rows were not consistently tied back to immutable source-row
+  identities when selected evidence positions were verified after filtering.
+- Exact duplicate detection could report no duplicate group even when selected
+  verification had not established that the canonical keep-first row
+  survived.
+- Contamination “partition count <= 1” semantics allowed an empty output
+  match to pass without verifying the explicitly retained row or requested
+  partition.
+- Multiple transformations of the same split column require constraint
+  validation; a subsequent chronological assignment must not override a
+  retained-partition choice.
+
+The service now verifies source-hash/row-position identity digests, output
+content against the planned source projection, quarantine identity/content,
+per-finding keep-first and retained-partition postconditions, and output hash
+and round-trip checks. Failed selected postconditions keep findings open and
+downgrade their detector result to `review_required`. Conflicting chronology
+and contamination retention requests are rejected during preview. No route,
+authorization, database schema, or migration changed.
+
+Isolated tests: backend **307 passed, 1 skipped, 247 warnings**; frontend
+**95 passed**; TypeScript/lint and production build passed. Test fixtures used
+temporary database/storage paths; the project database and user data were not
+used. Browser E2E and the supplied failed-operation artifacts remain
+**NOT VERIFIED**. Existing deployment, large-data resource, and multi-worker
+risks are unchanged.
+
+### Consolidated contamination verification follow-up (2026-11-05)
+
+A dataset-independent API regression confirmed that a selected contamination
+finding could fail verification when its recorded comparison fields were
+intentionally removed by a confirmed target-feature exclusion. In that case
+the aggregate scan could report zero remaining groups after a selected row
+removal, while finding-specific verification refused to use the already
+validated source-row identity mapping. The fix validates the comparison hash
+on source evidence, retained/excluded identities, requested partition, and
+the round-tripped output projection; output hash checks remain mandatory.
+When comparison fields remain in the output, their matching hash/partition
+state is also rechecked. The persisted verification basis distinguishes these
+paths.
+
+Existing conflict validation was reviewed and regression-tested: compatible
+chronological and retained-partition constraints proceed; a chronology
+assignment that moves a selected retained row is rejected during preview.
+No silent policy override or new transformation ordering was introduced.
+
+Fresh automated results: focused remediation **20 passed**; full backend
+**307 passed, 1 skipped**; frontend **95 passed**; TypeScript/lint and
+production build passed; `git diff --check` exited 0. The named manifest,
+report and finding evidence were not available in the checkout, so the
+synthetic reproduction establishes the generic defect but not the exact
+persisted fields of that operation. No browser verification, project database
+access, source-data mutation, migration, or schema change occurred.
+
+## Profiling, distribution, and report audit note (2026-11-05)
+
+Resolved in code and isolated regression tests:
+
+- Generic profile detail and its authenticated retrieval/refresh were
+  integrated with existing dataset JSON metadata; refresh checks the registered
+  file hash.
+- Mixed-format, mixed-timezone text dates could be classified as categorical
+  when an invalid value lowered the parse ratio. Parsing now handles mixed
+  supported formats in UTC and classifies a string field as datetime at the
+  explicit 70% sample threshold.
+- Target distribution results previously overwrote the target's `analyzed`
+  state with the metric's distribution status. The response now separates
+  `status` from `distribution_status`; the frontend displays target/class
+  results separately from predictor features.
+- Persisted distribution retrieval now verifies the source file itself,
+  rejecting absent or changed files rather than trusting only the registered
+  database hash.
+- Report snapshot and downloads are exercised against persisted profile and
+  distribution data, missing-analysis sections, ownership, and all supported
+  formats.
+
+No schema/migration was added. No production database or uploaded dataset was
+used. Fresh verification: focused backend **21 passed**; full backend **329
+passed, 1 skipped**; frontend **100 passed**; TypeScript/lint passed; build
+passed with 2,283 modules. Profile retrieval and report snapshots now reject or
+label stale data when source-file integrity fails. Existing warnings include Starlette/httpx,
+SQLAlchemy, Pydantic, pandas/PyArrow, Vite's `__dirname` loader notice, Node
+20.13.1 below Vite's minimum, and the large JS chunk warning.
+
+Residual concerns: profiling is pandas/in-memory and has no background
+processing or streaming path; statistical distribution metrics are
+approximate/descriptive and must not be read as leakage evidence; generated
+PDF is a text-oriented snapshot; page workflows, session behavior, responsive
+charts and downloads have not been checked in a real browser. Production-scale
+performance and deployed multi-worker behavior remain NOT VERIFIED.
+

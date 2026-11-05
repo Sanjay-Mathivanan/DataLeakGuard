@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite --port=3000 --host=0.0.0.0",
     "build": "vite build",
-    "test": "node --import tsx --test src/services/identityApi.test.ts src/services/datasetNavigation.test.ts src/services/api.test.ts src/pages/RepairPage.test.tsx src/pages/RemediationCenterPage.test.tsx src/pages/AnalysisSetupPage.test.tsx src/pages/DatasetsPage.test.ts src/pages/DatasetDetailPage.test.ts src/components/leakage/FindingEvidencePanel.test.tsx src/components/leakage/GroupedFindings.test.tsx src/components/history/DatasetHistoryTimeline.test.tsx src/components/dataset/featureProfiles.test.ts src/components/analysis/ColumnRecommendationsPanel.test.tsx src/components/analysis/SplitStrategyPanel.test.tsx src/components/analysis/targetFeatureWarnings.test.ts",
+    "test": "node --import tsx --test src/services/identityApi.test.ts src/services/datasetNavigation.test.ts src/services/api.test.ts src/pages/RepairPage.test.tsx src/pages/RemediationCenterPage.test.tsx src/pages/AnalysisSetupPage.test.tsx src/pages/PartitionDistributionPage.test.ts src/pages/DatasetsPage.test.ts src/pages/DatasetDetailPage.test.ts src/components/leakage/FindingEvidencePanel.test.tsx src/components/leakage/GroupedFindings.test.tsx src/components/history/DatasetHistoryTimeline.test.tsx src/components/dataset/featureProfiles.test.ts src/components/analysis/ColumnRecommendationsPanel.test.tsx src/components/analysis/SplitStrategyPanel.test.tsx src/components/analysis/targetFeatureWarnings.test.ts src/components/remediation/TrainOnlyImputationPanel.test.tsx",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit"

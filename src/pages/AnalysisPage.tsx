@@ -23,6 +23,7 @@ import { ColumnRecommendationsPanel } from '../components/analysis/ColumnRecomme
 import { SplitStrategy, SplitStrategyPanel } from '../components/analysis/SplitStrategyPanel';
 import { findPotentialTargetDerivedFeatures } from '../components/analysis/targetFeatureWarnings';
 import { loadConfirmedAnalysisSetup } from './AnalysisSetupPage';
+import type { TemporalEvaluationObjective } from './AnalysisSetupPage';
 
 type ColumnSelection = 'targetColumn' | 'entityColumn' | 'splitColumn' | 'timeColumn';
 
@@ -80,6 +81,8 @@ export const AnalysisPage: React.FC = () => {
   const [isGeneratingSplit, setIsGeneratingSplit] = useState(false);
   const [splitGenerationError, setSplitGenerationError] = useState<string | null>(null);
   const [splitOperation, setSplitOperation] = useState<SplitGenerationOperation | null>(null);
+  const [temporalObjective, setTemporalObjective] =
+    useState<TemporalEvaluationObjective>('future_prediction');
   const [configurationConfirmed, setConfigurationConfirmed] = useState(false);
   const [setupOrigin, setSetupOrigin] = useState(false);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
@@ -89,6 +92,8 @@ export const AnalysisPage: React.FC = () => {
     splitColumn?: string;
     targetColumn?: string;
     timeColumn?: string;
+    temporalObjective?: TemporalEvaluationObjective;
+    contaminationKeyColumns?: string[];
   } | null>(null);
   const [selection, setSelection] = useState<Record<ColumnSelection, string>>({
     targetColumn: '',
@@ -96,6 +101,8 @@ export const AnalysisPage: React.FC = () => {
     splitColumn: '',
     timeColumn: ''
   });
+  const [entityColumns, setEntityColumns] = useState<string[]>([]);
+  const [contaminationKeyColumns, setContaminationKeyColumns] = useState<string[]>([]);
 
   useEffect(() => {
     let active = true;
@@ -118,12 +125,17 @@ export const AnalysisPage: React.FC = () => {
     setIsGeneratingSplit(false);
     setSplitGenerationError(null);
     setSplitOperation(setup?.splitOperation ?? null);
+    setTemporalObjective(setup?.temporalObjective ?? 'future_prediction');
     setSelection({
       targetColumn: setup?.targetColumn ?? '',
       entityColumn: setup?.entityColumn ?? '',
       splitColumn: setup?.splitColumn ?? '',
       timeColumn: setup?.timeColumn ?? '',
     });
+    setEntityColumns(setup?.entityColumns ?? (
+      setup?.entityColumn ? [setup.entityColumn] : []
+    ));
+    setContaminationKeyColumns(setup?.contaminationKeyColumns ?? []);
 
     if (!id) {
       setLoadError('No dataset was selected.');
@@ -167,19 +179,34 @@ export const AnalysisPage: React.FC = () => {
 
   const options = useMemo(() => ({
     ...(selection.entityColumn ? { entityColumn: selection.entityColumn } : {}),
+    ...(entityColumns.length ? { entityColumns } : {}),
     ...(splitStrategy === 'existing' && selection.splitColumn
       ? { splitColumn: selection.splitColumn }
       : {}),
     ...(selection.targetColumn ? { targetColumn: selection.targetColumn } : {}),
     ...(selection.timeColumn ? { timeColumn: selection.timeColumn } : {}),
+    ...(selection.timeColumn ? { temporalObjective } : {}),
+    ...(contaminationKeyColumns.length ? { contaminationKeyColumns } : {}),
+    configurationConfirmed,
     splitStrategy,
     ...(splitStrategy === 'generated' && splitOperation
       ? { splitOperationId: splitOperation.id }
       : {})
-  }), [selection, splitStrategy, splitOperation]);
+  }), [
+    selection,
+    entityColumns,
+    contaminationKeyColumns,
+    splitStrategy,
+    splitOperation,
+    temporalObjective,
+    configurationConfirmed,
+  ]);
 
   const updateSelection = (key: ColumnSelection, value: string) => {
     setSelection((previous) => ({ ...previous, [key]: value }));
+    if (key === 'entityColumn') {
+      setEntityColumns(value ? [value] : []);
+    }
     setConfigurationConfirmed(false);
     setAnalysisResult(null);
     setAnalysisError(null);
@@ -395,8 +422,10 @@ export const AnalysisPage: React.FC = () => {
               </div>
               <dl className="mt-4 grid gap-x-4 gap-y-2 text-xs sm:grid-cols-2">
                 <dt className="text-slate-500">Target</dt><dd className="break-all font-mono">{selection.targetColumn || 'Not selected'}</dd>
-                <dt className="text-slate-500">Entity</dt><dd className="break-all font-mono">{selection.entityColumn || 'Not selected'}</dd>
+                <dt className="text-slate-500">Entity key</dt><dd className="break-all font-mono">{entityColumns.join(' + ') || selection.entityColumn || 'Not selected'}</dd>
+                <dt className="text-slate-500">Contamination comparison</dt><dd className="break-all font-mono">{contaminationKeyColumns.join(' + ') || 'Exact row content'}</dd>
                 <dt className="text-slate-500">Timestamp</dt><dd className="break-all font-mono">{selection.timeColumn || 'Not selected'}</dd>
+                <dt className="text-slate-500">Temporal objective</dt><dd>{temporalObjective === 'future_prediction' ? 'Predict future events' : 'Randomized holdout (chronology skipped)'}</dd>
                 <dt className="text-slate-500">Split strategy</dt><dd>{splitStrategy}</dd>
                 <dt className="text-slate-500">Split column</dt><dd className="break-all font-mono">{selection.splitColumn || 'Not selected'}</dd>
                 {splitOperation && <><dt className="text-slate-500">Generated split operation</dt><dd className="break-all font-mono">{splitOperation.id}</dd></>}
@@ -473,6 +502,25 @@ export const AnalysisPage: React.FC = () => {
               operation={splitOperation}
               onGenerate={() => void handleGenerateSplit()}
             />
+            <label className="mt-4 block max-w-xl text-xs font-semibold text-slate-700">
+              Temporal evaluation objective
+              <select
+                value={temporalObjective}
+                onChange={(event) => {
+                  setTemporalObjective(event.target.value as TemporalEvaluationObjective);
+                  setConfigurationConfirmed(false);
+                  setAnalysisResult(null);
+                  setAttemptedOptions(null);
+                }}
+                className="mt-1 block w-full rounded border border-slate-300 bg-white px-2 py-2 font-normal"
+              >
+                <option value="future_prediction">Predict future events</option>
+                <option value="randomized_holdout">Randomized holdout</option>
+              </select>
+              <span className="mt-1 block font-normal text-slate-500">
+                Randomized holdout skips timestamp-range interpretation; it does not imply that chronological evaluation passed.
+              </span>
+            </label>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-4">
               {visibleColumnSelectors.map(({ key, label, help }) => (
                 <div key={key}>

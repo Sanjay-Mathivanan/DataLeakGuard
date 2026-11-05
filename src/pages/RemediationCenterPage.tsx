@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { FindingEvidencePanel } from '../components/leakage/FindingEvidencePanel';
 import { SearchableColumnSelector } from '../components/analysis/SearchableColumnSelector';
+import { TrainOnlyImputationPanel } from '../components/remediation/TrainOnlyImputationPanel';
 import {
   cancelRemediationPlan,
   downloadRemediationArtifact,
@@ -146,6 +147,7 @@ type DetectorType = (typeof REMEDIATION_DETECTORS)[number]['type'];
 type SelectionState = { findingIds: string[]; allEligible: boolean };
 type DetectorConfiguration = {
   entityColumn?: string;
+  entityColumns?: string[];
   splitColumn?: string;
   targetColumn?: string;
   featureColumns?: string[];
@@ -157,6 +159,10 @@ type DetectorConfiguration = {
   trainLabel?: string;
   testLabel?: string;
 };
+export type DetectorActionConfigurations = Record<
+  string,
+  { action: RemediationActionName; config: DetectorConfiguration }
+>;
 
 const EMPTY_COUNTS: FindingCounts = {
   total: 0,
@@ -182,6 +188,54 @@ function selectableColumns(dataset: Dataset | null) {
     name: column.name,
     type: column.type,
   }));
+}
+
+export function hydrateActionConfigurations(
+  dataset: Dataset,
+  current: DetectorActionConfigurations = {},
+): DetectorActionConfigurations {
+  const analysisColumns = dataset.profile?.analysisColumns;
+  const splitStrategy = dataset.profile?.splitStrategy;
+  const sourceColumnNames = new Set((dataset.columns ?? []).map((column) => column.name));
+  const existingProfileColumn = (value: string | null | undefined) => (
+    value && sourceColumnNames.has(value) ? value : undefined
+  );
+  const persistedEntityColumns = (analysisColumns?.entityColumns
+    ?? (analysisColumns?.entityColumn ? [analysisColumns.entityColumn] : []))
+    .filter((column): column is string => Boolean(existingProfileColumn(column)));
+  const primaryEntityColumn = existingProfileColumn(analysisColumns?.entityColumn)
+    ?? persistedEntityColumns[0];
+  const persistedRoles: DetectorConfiguration = {
+    entityColumn: primaryEntityColumn,
+    entityColumns: persistedEntityColumns.filter((column) => column !== primaryEntityColumn),
+    targetColumn: existingProfileColumn(analysisColumns?.targetColumn),
+    timeColumn: existingProfileColumn(analysisColumns?.timeColumn),
+    splitColumn: existingProfileColumn(analysisColumns?.splitColumn),
+    ...(typeof splitStrategy?.testRatio === 'number'
+      ? { testRatio: splitStrategy.testRatio }
+      : {}),
+    ...(typeof splitStrategy?.randomSeed === 'number'
+      ? { randomSeed: splitStrategy.randomSeed }
+      : {}),
+  };
+  const defaults: DetectorActionConfigurations = {
+    exact_duplicate: { action: 'exact_duplicate_keep_first', config: {} },
+    entity_overlap: { action: 'review_only', config: persistedRoles },
+    target_leakage: { action: 'review_only', config: persistedRoles },
+    temporal_leakage: { action: 'review_only', config: persistedRoles },
+    train_test_contamination: { action: 'review_only', config: persistedRoles },
+  };
+  return Object.fromEntries(
+    Object.entries(defaults).map(([type, fallback]) => [
+      type,
+      {
+        action: current[type]?.action ?? fallback.action,
+        // Persisted choices seed the selectors; choices made in this center
+        // remain authoritative on refresh.
+        config: { ...fallback.config, ...current[type]?.config },
+      },
+    ]),
+  );
 }
 
 export function getActionOptions(findingType: string) {
@@ -616,8 +670,48 @@ export function DetectorActionConfiguration({
 
       {action === 'rebuild_group_split' && (
         <div className="mt-3 grid gap-3 md:grid-cols-2">
-          {roleSelector('entity', config.entityColumn, (value) => setConfig((current) => ({ ...current, entityColumn: value })))}
+          {roleSelector('entity', config.entityColumn, (value) => setConfig((current) => ({
+            ...current,
+            entityColumn: value,
+            entityColumns: (current.entityColumns ?? []).filter((column) => column !== value),
+          })))}
+          {(config.entityColumns ?? []).filter((column) => column !== config.entityColumn).map((column, index) => (
+            <div key={`${column}-${index}`} className="flex items-end gap-2">
+              <div className="min-w-0 flex-1">
+                <SearchableColumnSelector
+                  label={`Additional entity key column ${index + 1}`}
+                  value={column}
+                  columns={columns}
+                  onChange={(value) => setConfig((current) => {
+                    const next = [...(current.entityColumns ?? [])];
+                    if (!value || value === current.entityColumn || next.some((item, itemIndex) => itemIndex !== index && item === value)) {
+                      next.splice(index, 1);
+                    } else {
+                      next[index] = value;
+                    }
+                    return { ...current, entityColumns: next };
+                  })}
+                />
+              </div>
+              <button type="button" onClick={() => setConfig((current) => ({
+                ...current,
+                entityColumns: (current.entityColumns ?? []).filter((_, itemIndex) => itemIndex !== index + 1),
+              }))} className="rounded border border-slate-300 bg-white px-2 py-2 text-xs">
+                Remove
+              </button>
+            </div>
+          ))}
+          <button type="button"
+            disabled={!config.entityColumn || (config.entityColumns?.length ?? 0) >= 5}
+            onClick={() => setConfig((current) => ({
+              ...current,
+              entityColumns: [...(current.entityColumns ?? []), ''],
+            }))}
+            className="rounded border border-teal-300 bg-white px-3 py-2 text-xs font-semibold text-teal-800 disabled:opacity-50">
+            Add composite-key column
+          </button>
           {roleSelector('split', config.splitColumn, (value) => setConfig((current) => ({ ...current, splitColumn: value })))}
+          {roleSelector('target', config.targetColumn, (value) => setConfig((current) => ({ ...current, targetColumn: value })))}
           <label className="text-xs text-slate-700">Test ratio
             <input type="number" min="0.05" max="0.95" step="0.05" value={config.testRatio ?? 0.2}
               onChange={(event) => setConfig((current) => ({ ...current, testRatio: Number(event.target.value) }))}
@@ -737,9 +831,8 @@ export const RemediationCenterPage: React.FC = () => {
   const [countsByDetector, setCountsByDetector] = useState<Record<string, FindingCounts>>({});
   const [findingCache, setFindingCache] = useState<Record<string, PersistedFinding>>({});
   const [selections, setSelections] = useState<Record<string, SelectionState>>({});
-  const [actionConfigurations, setActionConfigurations] = useState<
-    Record<string, { action: RemediationActionName; config: DetectorConfiguration }>
-  >({});
+  const [actionConfigurations, setActionConfigurations] =
+    useState<DetectorActionConfigurations>({});
   const [history, setHistory] = useState<RemediationPlanRecord[]>([]);
   const [historyTotal, setHistoryTotal] = useState(0);
   const [historySkip, setHistorySkip] = useState(0);
@@ -770,6 +863,7 @@ export const RemediationCenterPage: React.FC = () => {
       ]);
       if (!datasetResult) throw new Error('Dataset not found or is not available to this account.');
       setDataset(datasetResult);
+      setActionConfigurations((current) => hydrateActionConfigurations(datasetResult, current));
       setDatasetSummary(findingsResult.datasetSummary);
       setHistory(planResult.items);
       setHistoryTotal(planResult.total);
@@ -853,9 +947,16 @@ export const RemediationCenterPage: React.FC = () => {
           : { finding_ids: selection.findingIds }),
       };
       if (actionName === 'rebuild_group_split') {
+          const selectedEntityColumns = Array.from(new Set([
+          ...(config.entityColumn ? [config.entityColumn] : []),
+          ...(config.entityColumns ?? []).filter(Boolean),
+        ]));
         Object.assign(payload, {
-          entity_column: config.entityColumn,
+          ...(selectedEntityColumns.length > 1
+            ? { entity_columns: selectedEntityColumns }
+            : { entity_column: selectedEntityColumns[0] }),
           split_column: config.splitColumn,
+          target_column: config.targetColumn,
           test_ratio: config.testRatio ?? 0.2,
           random_seed: config.randomSeed ?? 42,
           train_label: config.trainLabel || 'train',
@@ -1014,6 +1115,43 @@ export const RemediationCenterPage: React.FC = () => {
           </article>
         ))}
       </section>
+      <section aria-label="Confirmed analysis configuration" className="rounded-xl border border-slate-200 bg-white p-4">
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <div>
+            <h2 className="text-sm font-semibold text-slate-900">Last confirmed analysis configuration</h2>
+            <p className="mt-1 text-xs text-slate-600">
+              Persisted Analysis Setup choices prefill remediation selectors only. No repair action is automatically selected.
+            </p>
+          </div>
+          <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[10px] font-semibold text-slate-700">
+            Split strategy: {typeof dataset.profile?.splitStrategy?.strategy === 'string'
+              ? dataset.profile.splitStrategy.strategy
+              : 'not recorded'}
+          </span>
+        </div>
+        <dl className="mt-3 grid gap-3 text-xs sm:grid-cols-2 lg:grid-cols-4">
+          {[
+            ['Target', dataset.profile?.analysisColumns?.targetColumn],
+            ['Entity key', (dataset.profile?.analysisColumns?.entityColumns ?? (
+              dataset.profile?.analysisColumns?.entityColumn
+                ? [dataset.profile.analysisColumns.entityColumn]
+                : []
+            )).join(' + ')],
+            ['Timestamp', dataset.profile?.analysisColumns?.timeColumn],
+            ['Split', dataset.profile?.analysisColumns?.splitColumn],
+          ].map(([label, value]) => (
+            <div key={label}>
+              <dt className="text-slate-500">{label}</dt>
+              <dd className="mt-0.5 break-all font-mono font-semibold text-slate-800">
+                {typeof value === 'string' && value ? value : 'Not configured'}
+              </dd>
+            </div>
+          ))}
+        </dl>
+        <p className="mt-3 text-[11px] text-slate-600">
+          Entity overlap is defined by the selected identifier: choosing a sensor ID evaluates generalization to unseen sensors, while choosing a machine ID evaluates generalization to unseen machines. Confirm the intended unit before rebuilding a split.
+        </p>
+      </section>
       {unclassifiedCount > 0 && (
         <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
           {unclassifiedCount.toLocaleString()} finding(s) use types outside the five supported detector categories. They are not silently assigned to a remediation group.
@@ -1042,6 +1180,8 @@ export const RemediationCenterPage: React.FC = () => {
           />
         ))}
       </section>
+
+      <TrainOnlyImputationPanel dataset={dataset} />
 
       <section className="rounded-xl border border-teal-200 bg-white p-4 shadow-sm">
         <div className="flex flex-wrap items-start justify-between gap-3">
@@ -1090,7 +1230,28 @@ export const RemediationCenterPage: React.FC = () => {
             {plan.plan.excludedFeatureColumns.length > 0 && (
               <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-950">
                 Model-ready output will exclude: <span className="font-mono">{plan.plan.excludedFeatureColumns.join(', ')}</span>. The target column is retained; this is not a claim about causal data collection.
+                {plan.plan.featureExclusionReasons && (
+                  <ul className="mt-2 list-disc space-y-1 pl-5">
+                    {Object.entries(plan.plan.featureExclusionReasons).map(([column, evidence]) => (
+                      <li key={column}>
+                        <span className="font-mono">{column}</span>: {evidence.reason}
+                        {evidence.evidenceSignal ? ` (${evidence.evidenceSignal})` : ''}
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </div>
+            )}
+            {plan.plan.analysisConfiguration && (
+              <details className="rounded-lg border border-slate-200 bg-white p-3">
+                <summary className="cursor-pointer text-xs font-semibold text-slate-800">Analysis Setup and remediation columns</summary>
+                <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-words text-[10px] text-slate-700">
+                  {JSON.stringify({
+                    confirmedAnalysis: plan.plan.analysisConfiguration,
+                    remediation: plan.plan.remediationConfiguration,
+                  }, null, 2)}
+                </pre>
+              </details>
             )}
             {plan.plan.splitConfigurations.length > 0 && (
               <details className="rounded-lg border border-slate-200 bg-white p-3">
@@ -1156,6 +1317,9 @@ export const RemediationCenterPage: React.FC = () => {
             )}
             {plan.status === 'completed' && (
               <div className="space-y-3 border-t border-slate-200 pt-3">
+                <p className="text-[11px] text-slate-600">
+                  {plan.plan.verifiedFindingIds?.length ?? 0} finding(s) reached verified status. Skipped checks: {Number(plan.plan.verification?.checks_skipped ?? 0)}; skipped is not counted as passed.
+                </p>
                 <p className="text-xs text-slate-700">
                   Verification: {plan.plan.verification?.all_checks_passed === true ? 'all recorded checks passed' : 'review required; one or more checks did not pass'} · final status: <strong>{plan.plan.finalStatus ?? 'not classified'}</strong>
                 </p>
@@ -1172,6 +1336,14 @@ export const RemediationCenterPage: React.FC = () => {
                     );
                   })}
                 </div>
+                {plan.plan.missingValueCountsBefore && plan.plan.missingValueCountsAfter && (
+                  <details className="rounded-lg border border-slate-200 bg-white p-3">
+                    <summary className="cursor-pointer text-xs font-semibold text-slate-800">Observed missing-value counts (no imputation was applied)</summary>
+                    <pre className="mt-2 max-h-32 overflow-auto whitespace-pre-wrap break-words text-[10px] text-slate-700">
+                      {JSON.stringify({ before: plan.plan.missingValueCountsBefore, after: plan.plan.missingValueCountsAfter }, null, 2)}
+                    </pre>
+                  </details>
+                )}
                 <p className="break-all text-[10px] text-slate-500">Original SHA-256: {plan.plan.originalFileSha256}</p>
                 <p className="break-all text-[10px] text-slate-500">Final SHA-256: {plan.plan.finalFileSha256 ?? 'unavailable'}</p>
               </div>

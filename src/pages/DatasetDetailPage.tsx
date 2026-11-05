@@ -15,7 +15,7 @@ import {
   Info
 } from 'lucide-react';
 import { Dataset } from '../types';
-import { getDatasetById, getFindingsPage } from '../services/api';
+import { getDatasetById, getFindingsPage, refreshDatasetProfiling } from '../services/api';
 import { PersistedFindingsBrowser } from '../components/leakage/PersistedFindingsBrowser';
 import { DatasetHistoryTimeline } from '../components/history/DatasetHistoryTimeline';
 import { FeatureProfiles } from '../components/dataset/FeatureProfiles';
@@ -35,7 +35,7 @@ export const DatasetDetailPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const { error } = useToast();
+  const { error, success } = useToast();
 
   const [dataset, setDataset] = useState<Dataset | null>(null);
   const [loading, setLoading] = useState(true);
@@ -46,6 +46,7 @@ export const DatasetDetailPage: React.FC = () => {
     : 'overview';
   const [activeTab, setActiveTab] = useState<'overview' | 'profile' | 'integrity' | 'distribution' | 'history'>(initialTab);
   const [findingTotal, setFindingTotal] = useState<number | null>(null);
+  const [refreshingProfile, setRefreshingProfile] = useState(false);
 
   useEffect(() => {
     async function load() {
@@ -103,6 +104,23 @@ export const DatasetDetailPage: React.FC = () => {
   }
 
   const isCV = dataset.type === 'computer-vision';
+
+  const refreshProfile = async () => {
+    setRefreshingProfile(true);
+    try {
+      await refreshDatasetProfiling(dataset.id);
+      const refreshedDataset = await getDatasetById(dataset.id);
+      if (refreshedDataset) setDataset(refreshedDataset);
+      success('Profile Refreshed', 'Detailed statistics were recomputed from the verified uploaded source.');
+    } catch (profileError) {
+      error(
+        'Profiling Error',
+        profileError instanceof Error ? profileError.message : 'Could not refresh the detailed profile.'
+      );
+    } finally {
+      setRefreshingProfile(false);
+    }
+  };
 
   return (
     <div className="space-y-6 animate-in fade-in duration-200">
@@ -346,7 +364,26 @@ export const DatasetDetailPage: React.FC = () => {
               No annotation or label analysis is returned by this upload profiler.
             </p>
           ) : (
-            <FeatureProfiles dataset={dataset} />
+            <>
+              <div className="flex flex-wrap justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => navigate(`/distribution-analysis?datasetId=${encodeURIComponent(dataset.id)}`)}
+                  className="rounded-lg border border-slate-300 px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                >
+                  Compare configured partitions
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void refreshProfile()}
+                  disabled={refreshingProfile}
+                  className="rounded-lg bg-teal-700 px-3 py-2 text-xs font-semibold text-white hover:bg-teal-800 disabled:opacity-50"
+                >
+                  {refreshingProfile ? 'Profiling…' : 'Refresh detailed profile'}
+                </button>
+              </div>
+              <FeatureProfiles dataset={dataset} />
+            </>
           )}
         </div>
       )}
@@ -376,6 +413,13 @@ export const DatasetDetailPage: React.FC = () => {
       {activeTab === 'distribution' && (
         <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-4 shadow-xs">
           <h3 className="text-sm font-semibold text-slate-900">Distribution &amp; Split Information</h3>
+          <button
+            type="button"
+            onClick={() => navigate(`/distribution-analysis?datasetId=${encodeURIComponent(dataset.id)}`)}
+            className="rounded-lg bg-teal-700 px-3 py-2 text-xs font-semibold text-white hover:bg-teal-800"
+          >
+            Analyze configured partitions
+          </button>
           {dataset.profile?.splitColumn && dataset.profile.splitRowCounts ? (
             <div className="space-y-3">
               <p className="text-xs text-slate-600">Observed split row counts for configured column <strong>{dataset.profile.splitColumn}</strong>. These are descriptive counts, not distribution-shift metrics.</p>
