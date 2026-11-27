@@ -1,0 +1,6 @@
+DataLeakGuard Automatic Sync Test
+
+This file was pushed to GitHub.
+Testing automatic synchronization on Windows.
+
+Status: Testing
